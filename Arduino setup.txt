@@ -24,3 +24,23 @@ Hold BOOT
 Press RST
 Release BOOT
 Upload sketch
+
+-----------------------------------------
+E:\Space_Invaders\Original>python get_arduino_settings_wroom32.py
+Using: C:\Users\steve\AppData\Local\Temp\arduino-language-server2765013261\build\build.options.json
+
+=== ESP32-WROOM-32 Arduino IDE Settings ===
+
+UploadSpeed = 921600
+CPUFreq = 240
+FlashFreq = 80
+FlashMode = qio
+FlashSize = 4M
+PartitionScheme = default 4MB with spifss
+DebugLevel = none
+PSRAM = disabled
+LoopCore = 1
+EventsCore = 1
+EraseFlash = none
+JTAGAdapter = default 
+---------------------------------------------
