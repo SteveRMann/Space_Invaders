@@ -1,0 +1,26 @@
+💻 Software Setup – ESP32-S3 (Critical)
+Arduino IDE 2.x
+Library: FastLED (Daniel Garcia)
+
+ESP32 Board Package (IMPORTANT)
+⚠️ Audio requires a specific ESP32 core version
+Board package: esp32 by Espressif
+Required version: 2.0.17
+❌ Do NOT use 3.x
+
+Board Settings
+Board: ESP32S3 Dev Module
+Flash Mode: DIO 80 MHz
+Flash Size: 16 MB
+Partition: 16M FLASH (3MB APP / 9.9MB FATFS)
+PSRAM: Disabled
+USB CDC on Boot: Disabled These settings are compatible with cheap ESP32 S3 boards. 
+  Many AliExpress boards having issue with OPI RAM :-(
+
+🚀 Uploading Firmware (ESP32-S3)
+Use USB port labeled UART / COM
+If upload fails:
+Hold BOOT
+Press RST
+Release BOOT
+Upload sketch

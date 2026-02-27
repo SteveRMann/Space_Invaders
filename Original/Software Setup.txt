@@ -1,0 +1,28 @@
+ Software Setup (CRITICAL!)
+This is where most people fail. Read carefully.
+
+Step 1: Install Arduino IDE & Libraries
+
+Download & Install Arduino IDE 2.x.
+Go to Sketch -> Include Library -> Manage Libraries.
+Search for FastLED (by Daniel Garcia) and install it.
+Step 2: Board Settings (The "Audio Trap")
+
+The audio engine requires a specific core version to run without glitches.
+
+Board Manager: Search for esp32 by Espressif.
+👉 DOWNGRADE: Select Version 2.0.17 from the dropdown list and install. Do NOT use Version 3.0.x!
+Select Board: ESP32S3 Dev Module.
+Step 3: Tools Menu Settings
+
+Set these exactly as shown to avoid boot loops:
+
+Flash Mode: DIO 80MHz
+PSRAM: Disabled (Crucial! The code runs in internal RAM).
+USB CDC On Boot: Disabled (Use the UART port for upload).
+Flash Size: 8MB or 16MB (depending on your board).
+Step 4: Upload
+
+Connect USB cable to the port labeled UART (or COM), not the one labeled USB (if your board has two).
+If upload fails: Hold BOOT, Press RST, Release BOOT.
+Upload Sketch.

@@ -1,0 +1,18 @@
+First Start & Web Configuration
+ 
+Power system using external 5 V
+Hold menu button for 4 seconds
+LED strip turns blue
+
+Connect WiFi:
+  SSID: ESP-RGB-INVADERS
+  Password: 12345678
+
+Open browser: http://192.168.4.1
+
+Configure:
+  LED count
+  Brightness
+  Sound options
+  
+Save → automatic reboot
