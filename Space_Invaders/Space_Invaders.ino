@@ -320,6 +320,8 @@ void playShotSound(int color) {
 ///  }
 ///}
 
+/// Not used
+/*
 void playToneI2S(int freq, int durationMs) {
   if (freq <= 0) {
     size_t bytes_written;
@@ -343,10 +345,12 @@ void playToneI2S(int freq, int durationMs) {
   i2s_write(I2S_NUM_0, buffer, samples * 2, &bytes_written, portMAX_DELAY);
   free(buffer);
 }
+*/
 
-void audioTask(void *parameter) {
-  return;
-}
+///Unused function
+///void audioTask(void *parameter) {
+///  return;
+///}
 
 /*
   i2s_config_t i2s_config = {
@@ -781,6 +785,8 @@ void loadSounds() {
   melodyFromStr(melShotWhite, cfg_snd_shot_w);
 }
 
+/// Flagged as not used
+/*
 void handleSaveSounds() {
   cfg_snd_start = server.arg("s_start");
   cfg_snd_win = server.arg("s_win");
@@ -808,6 +814,7 @@ void handleSaveSounds() {
   server.sendHeader("Location", "/sounds");
   server.send(303);
 }
+*/
 
 void applyProfileDefaults(String prefix) {
   if (prefix == "def_") {
@@ -1313,7 +1320,7 @@ void setup() {
   server.on("/sounds", []() {
     server.send(200, "text/html", getSoundHTML());
   });
-  server.on("/savesounds", handleSaveSounds);
+  /////  server.on("/savesounds", handleSaveSounds);
   server.on("/colors", []() {
     server.send(200, "text/html", getColorHTML());
   });
