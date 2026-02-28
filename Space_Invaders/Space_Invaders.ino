@@ -3,6 +3,7 @@
 // HARDWARE: ESP32-WROOM Devkit v1
 // CORE VERSION: 2.0.17 (Required?)
 // This version strips the sound and 12s code.
+// V2 adds a "continue" button to go to the next level.
 // ==========================================================================
 
 
@@ -38,6 +39,7 @@
 #define PIN_BTN_RED 33
 #define PIN_BTN_GREEN 26
 #define PIN_BTN_WHITE 32
+#define PIN_BTN_CONTINUE 27  // <<< NEW Continue button- used to go to the next level
 
 #define CONFIG_VERSION 31
 #define FRAME_DELAY 16  // 16ms = approx. 60 FPS
@@ -134,6 +136,8 @@ CRGB getColor(int colorCode);
 void drawCrispPixel(float pos, CRGB color);
 void flashPixel(int pos);
 
+void saveHighscores();
+
 
 
 // --------------------------------------------------------------------------
@@ -218,6 +222,8 @@ bool buttonsReleased = true;
 
 unsigned long btnWhitePressTime = 0;
 bool btnWhiteHeld = false;
+unsigned long btnContinuePressTime = 0;  // when the continue button was pressed
+bool btnContinueHeld = false;            // debounce flag for the continue button
 unsigned long comboTimer = 0;
 bool isWaitingForCombo = false;
 
@@ -257,6 +263,9 @@ CRGB hexToCRGB(String hex) {
   return CRGB((number >> 16) & 0xFF, (number >> 8) & 0xFF, number & 0xFF);
 }
 
+bool levelJustFinished = false;  // <<< NEW – tells us we just won a level
+
+// -------------------- Melody --------------------
 Melody parseSoundString(String data) {
   Melody m;
   if (data.length() == 0) return m;
@@ -285,10 +294,158 @@ Melody parseSoundString(String data) {
   return m;
 }
 
+//-------------------- melody_FromStr --------------------
 void melodyFromStr(Melody &m, String s) {
   m = parseSoundString(s);
 }
 
+// ---------------------------------------------------------------------------
+//  abortAndResetGame() – complete wipe (keeps Wi‑Fi, OTA, colours, etc.)
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// abortAndResetGame() – full wipe for a *new* player
+// ---------------------------------------------------------------------------
+void abortAndResetGame() {
+  // -------------------------------------------------
+  // 1️⃣  Erase all containers that belong to the current run
+  // -------------------------------------------------
+  enemies.clear();
+  shots.clear();
+  bossSegments.clear();
+  bossProjectiles.clear();
+
+  // -------------------------------------------------
+  // 2️⃣  Reset run‑time statistics and flags
+  // -------------------------------------------------
+  stat_lastGameShots = 0;
+  currentScore = 0;
+  levelStartTime = 0;
+  levelMaxPossibleScore = 0;
+  levelAchievedScore = 0;
+
+  // UI / game‑play flags
+  levelJustFinished = false;  // **critical – clears the “continue” flag**
+  isWaitingForCombo = false;
+  buttonsReleased = true;
+
+  // Timers / state variables (so the next frame starts clean)
+  lastLoopTime = 0;
+  stateTimer = 0;
+  lastShotMove = 0;
+  lastEnemyMove = 0;
+  lastFireTime = 0;
+  bossActionTimer = 0;
+  comboTimer = 0;
+
+  // -------------------------------------------------
+  // 3️⃣  Reset the *campaign* variables
+  // -------------------------------------------------
+  // Use the start‑level the user set in the web UI.
+  // If you *always* want level 1, simply replace the line below with
+  //   currentLevel = 1;
+  currentLevel = config_start_level;  // <-- honour UI setting
+  currentBossType = 0;                // no boss at the very beginning
+  enemyFrontIndex = (float)config_num_leds - 1.0;
+
+  // Boss‑specific state machines – bring them back to their initial state
+  boss2Section = 0;
+  boss2State = B2_MOVE;
+  boss2ShotsFired = 0;
+  boss2LockedColor = 1;
+  boss3State = B3_MOVE;
+  boss3PhaseIndex = 0;
+  boss3BurstCounter = 0;
+
+  // -------------------------------------------------
+  // 4️⃣  UI / state‑machine – start the *intro* for the chosen level
+  // -------------------------------------------------
+  currentState = STATE_INTRO;
+  startLevelIntro(currentLevel);  // now the intro uses the correct level
+
+  // -------------------------------------------------
+  // 5️⃣  Persist high‑score / last‑games (keep total shots/kills)
+  // -------------------------------------------------
+  saveHighscores();
+}
+
+
+// ---------------------------------------------------------------------------
+//  continueToNextLevel() – move to the next, harder level (keep score)
+// ---------------------------------------------------------------------------
+void continueToNextLevel() {
+  // 1️⃣  Advance the level index
+  currentLevel++;
+
+  // 2️⃣  Reset the per‑level containers (enemies, boss pieces, shots…)
+  enemies.clear();
+  shots.clear();
+  bossSegments.clear();
+  bossProjectiles.clear();
+
+  // 3️⃣  Reset per‑level timers / flags
+  lastShotMove = lastEnemyMove = lastFireTime = bossActionTimer = 0;
+  comboTimer = 0;
+  isWaitingForCombo = false;
+  buttonsReleased = true;
+  enemyFrontIndex = (float)config_num_leds - 1.0;
+  currentBossType = levels[currentLevel].bossType;
+
+  // 4️⃣  Initialise boss‑specific state machines
+  if (currentBossType == 2) {  // Masterblaster (Boss 1)
+    boss2Section = 0;
+    boss2State = B2_MOVE;
+    markerPos[0] = (int)(config_num_leds * (boss2Cfg.m1 / 100.0));
+    markerPos[1] = (int)(config_num_leds * (boss2Cfg.m2 / 100.0));
+    markerPos[2] = (int)(config_num_leds * (boss2Cfg.m3 / 100.0));
+  } else if (currentBossType == 3) {  // RGB Overlord (Boss 3)
+    boss3State = B3_MOVE;
+    boss3PhaseIndex = 0;
+    boss3Markers[0] = (int)(config_num_leds * 0.66);
+    boss3Markers[1] = (int)(config_num_leds * 0.50);
+    boss3BurstCounter = 0;
+  }
+
+  // 5️⃣  Build the level‑specific entities (normal wave or boss)
+  if (currentBossType == 0) {  // normal enemies
+    int count = levels[currentLevel].length;
+    if (count <= 0) count = 10;
+    for (int i = 0; i < count; ++i) enemies.push_back({ (int)random(1, 4), 0.0 });
+    currentState = STATE_PLAYING;
+  } else {                       // any boss
+    if (currentBossType == 1) {  // The Tank (boss 2)
+      for (int i = 0; i < 9; ++i) bossSegments.push_back({ 0, boss2Cfg.hpPerLed, boss2Cfg.hpPerLed, false, i });
+    } else if (currentBossType == 2) {  // Masterblaster (boss 1)
+      for (int i = 0; i < 3; ++i) bossSegments.push_back({ 3, boss1Cfg.hpPerLed, boss1Cfg.hpPerLed, true, 0 });
+      for (int i = 0; i < 3; ++i) bossSegments.push_back({ 1, boss1Cfg.hpPerLed, boss1Cfg.hpPerLed, true, 0 });
+      for (int i = 0; i < 3; ++i) bossSegments.push_back({ 3, boss1Cfg.hpPerLed, boss1Cfg.hpPerLed, true, 0 });
+    } else if (currentBossType == 3) {  // RGB Overlord (boss 3)
+      for (int i = 0; i < 15; ++i) {
+        int mixColor = random(4, 7);
+        bossSegments.push_back({ mixColor, boss3Cfg.hpPerLed, boss3Cfg.hpPerLed, true, i });
+      }
+    }
+    currentState = STATE_BOSS_PLAYING;
+  }
+
+  // 6️⃣  Kick off the level‑intro animation (so the player sees the new bar)
+  startLevelIntro(currentLevel);
+
+  // 7️⃣  We are no longer “just‑finished”; clear the flag.
+  levelJustFinished = false;
+}
+
+// ---------------------------------------------------------------------------
+//  Optional tiny menu visual (only used if you enable STATE_MENU)
+// ---------------------------------------------------------------------------
+void drawMenu() {
+  FastLED.clear();
+  for (int i = 0; i < config_num_leds; ++i) {
+    if ((i + (millis() / 120)) % 12 < 6) leds[i + ledStartOffset] = CRGB::Blue;
+  }
+  // keep the home‑base bright so the player still knows where to stand
+  for (int i = 0; i < config_homebase_size; ++i) leds[i + ledStartOffset] = CRGB::White;
+  FastLED.show();
+}
 
 
 // --------------------------------------------------------------------------
@@ -540,9 +697,11 @@ void checkWinCondition() {
       registerGameEnd(currentScore);
       currentState = STATE_GAME_FINISHED;
     } else {
+      // ----- WIN THIS LEVEL ------------------
       playSound(EVT_WIN);
       currentState = STATE_LEVEL_COMPLETED;
       stateTimer = millis();
+      levelJustFinished = true;  // <<< NEW – we are now waiting
     }
   }
 }
@@ -1071,6 +1230,16 @@ void handleSave() {
 }
 
 
+void handleContinue() {
+  if (levelJustFinished) {
+    continueToNextLevel();
+    server.send(200, "text/plain", "Next level started");
+  } else {
+    server.send(400, "text/plain", "No finished level to continue");
+  }
+}
+
+
 String getUpdateHTML() {
   String h = "<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>";
   h += "<title>Firmware Update</title>";
@@ -1221,6 +1390,14 @@ String getHTML() {
 
   h += "<br><input type='submit' value='SAVE SETTINGS' style='width:100%;background:#009900;padding:15px;font-size:1.2em;cursor:pointer;font-weight:bold;'></form>";
   h += "<div style='margin-top:20px;text-align:center;'><a href='/update'><button style='background:#0044cc;padding:10px;font-size:1em;'>⬇ FIRMWARE UPDATE ⬇</button></a></div>";
+
+  //  NEW – Continue to next level (GPIO‑27) ---------------------------------
+  h += "<div style='margin-top:20px; text-align:center;'>";
+  h += "  <form action='/next' method='POST'>";  // <-- POST to the /next endpoint we added in setup()
+  h += "    <button type='submit' style='width:100%;background:#0066ff;padding:12px;font-size:1.1em;'>▶ Continue to Next Level</button>";
+  h += "  </form>";
+  h += "</div>";
+
   h += "<br><br><form action='/reset' method='POST' onsubmit='return confirmReset()'><button type='submit' style='background:#990000;padding:10px;'>FACTORY RESET (Clear Scores)</button></form>";
   h += "<div class='credits'><a href='https://paypal.me/WeisWernau' target='_blank'>paypal.me/WeisWernau</a><br><br><i>\"I don't need your money. But if I can buy my wife a bouquet of flowers, the chance increases that I can publish more funny projects - every married man knows what I'm talking about.\"</i></div>";
   h += "</body></html>";
@@ -1264,6 +1441,7 @@ void setup() {
   pinMode(PIN_BTN_RED, INPUT_PULLUP);
   pinMode(PIN_BTN_GREEN, INPUT_PULLUP);
   pinMode(PIN_BTN_WHITE, INPUT_PULLUP);
+  pinMode(PIN_BTN_CONTINUE, INPUT_PULLUP);  // <<< NEW
 
   setupDefaultConfig();
   preferences.begin("game", true);
@@ -1348,6 +1526,8 @@ void setup() {
       }
     });
 
+  server.on("/next", HTTP_POST, handleContinue);  // <<< NEW
+
   startLevelIntro(config_start_level);
 
   FastLED.clear();
@@ -1411,38 +1591,92 @@ void loop() {
     return;
   }
 */
+
   // 6. SETUP MODE FEEDBACK
+  // -----------------------------------------------------------------
+  //  WHITE BUTTON (GPIO 32) – Reset / Continue handling
+  // -----------------------------------------------------------------
   if (digitalRead(PIN_BTN_WHITE) == LOW) {
-    if (!btnWhiteHeld) {
+    // ---------- button pressed ----------
+    if (!btnWhiteHeld) {  // first edge
       btnWhiteHeld = true;
       btnWhitePressTime = now;
     } else {
-      // Feedback if held > 3s
+      // Long‑press (>3 s) → Wi‑Fi configuration mode (unchanged)
       if (now - btnWhitePressTime > 3000) {
         FastLED.clear();
-        // Blink Blue/Black every 250ms
         if ((now / 250) % 2 == 0) {
-          for (int i = 0; i < config_num_leds; i += 2) leds[i + ledStartOffset] = CRGB::Blue;
+          for (int i = 0; i < config_num_leds; i += 2)
+            leds[i + ledStartOffset] = CRGB::Blue;
         }
         FastLED.show();
-        return;  // Pause Game Loop while holding
+        return;  // stay in Wi‑Fi mode until the button is released
       }
     }
   } else {
-    // RELEASED
-    if (btnWhiteHeld) {
-      unsigned long holdTime = now - btnWhitePressTime;
+    // ---------- button released ----------
+    if (btnWhiteHeld) {  // we just let go
+      unsigned long pressLen = now - btnWhitePressTime;
       btnWhiteHeld = false;
-      if (holdTime > 3000) {
+
+      // ---- long press -> Wi‑Fi (safety net) ----
+      if (pressLen > 3000) {
         wifiMode = true;
-        enableWiFi();
+        enableWiFi();  // start AP + web‑UI
         return;
-      } else if (holdTime < 1000) {
-        currentState = STATE_INTRO;
-        startLevelIntro(config_start_level);
+      }
+
+      // ---- short press ----
+      ///      if (levelJustFinished) {
+      ///        // Still on the “you win” screen → go to the next level
+      ///        continueToNextLevel();
+      ///      } else {
+      // Normal situation → **full reset** for a fresh player
+      abortAndResetGame();  // <-- NEW – true full reset
+      return;               // *** stop processing the rest of loop() ***
+    }
+  }
+
+
+  // -----------------------------------------------------------------
+  //  NEW: "Continue" button (GPIO27) – go to the next level
+  // -----------------------------------------------------------------
+  if (digitalRead(PIN_BTN_CONTINUE) == LOW) {  // button pressed
+    if (!btnContinueHeld) {                    // first edge
+      btnContinueHeld = true;
+      btnContinuePressTime = now;
+    }
+    // (no long‑press behaviour – only a quick tap matters)
+  } else {                  // button released
+    if (btnContinueHeld) {  // we just let go
+      unsigned long holdTime = now - btnContinuePressTime;
+      btnContinueHeld = false;
+
+      // -------------------------------------------------------------
+      // Only allow a transition when the game has just finished a level
+      // -------------------------------------------------------------
+      if (levelJustFinished && holdTime < 1000) {  // short tap
+        continueToNextLevel();                     // <<< NEW ACTION
+      }
+      // (If the button is pressed at any other time we simply ignore it)
+    }
+  }
+
+  // -------------------------------------------------------------
+  // Light‑up the “sacrifice” LED while a level‑completion is waiting
+  // -------------------------------------------------------------
+  if (levelJustFinished) {
+    // Blink the sacrificial LED (LED0) at 2Hz to hint the player
+    static unsigned long lastBlink = 0;
+    if (now - lastBlink >= 250) {
+      lastBlink = now;
+      if (config_sacrifice_led) {
+        leds[0] = (leds[0] == CRGB::Black) ? CRGB(20, 0, 0) : CRGB::Black;
+        FastLED.show();
       }
     }
   }
+
 
   if (currentState == STATE_LEVEL_COMPLETED) {
     updateLevelCompletedAnim();
@@ -1468,6 +1702,25 @@ void loop() {
     updateLevelIntro();
     return;
   }
+
+  // -----------------------------------------------------------------
+  // OPTIONAL MENU STATE – shows a simple “press white to continue”
+  // (Uncomment the block in `setup()` if you want a visual pause)
+  // -----------------------------------------------------------------
+  if (currentState == STATE_MENU) {
+    drawMenu();
+    // White‑button press while we are in the menu starts the next level
+    if (digitalRead(PIN_BTN_WHITE) == LOW && !btnWhiteHeld) {
+      btnWhiteHeld = true;
+      btnWhitePressTime = now;
+    }
+    if (btnWhiteHeld && digitalRead(PIN_BTN_WHITE) == HIGH) {
+      btnWhiteHeld = false;
+      if (levelJustFinished) continueToNextLevel();
+    }
+    return;
+  }
+
 
   if (currentState == STATE_PLAYING || currentState == STATE_BOSS_PLAYING) {
     bool b = (digitalRead(PIN_BTN_BLUE) == LOW);
