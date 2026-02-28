@@ -31,7 +31,7 @@
 #define I2S_DOUT 6
 
 #define PIN_LED_DATA 15
-#define MAX_LEDS 256
+#define MAX_LEDS 480
 #define LED_TYPE WS2812B
 #define COLOR_ORDER GRB
 
