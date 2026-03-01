@@ -1,0 +1,17 @@
+Create a folder, e.g. /home/pi/sounds, and put a WAV or MP3 file for each event.
+Name them exactly as the enum values so the mapping code can be trivial:
+
+File name (lower case)	Content (example)
+evt_start.wav	Intro jingle
+evt_win.wav	Victory fanfare
+evt_lose.wav	Game over buzz
+evt_mistake.wav	Penalty beep
+evt_hit_success.wav	“Kill” pop
+evt_shot_blue.wav	Blue laser
+evt_shot_red.wav	Red laser
+evt_shot_green.wav	Green laser
+evt_shot_white.wav	White/combo laser
+
+Make sure they are 16 bit PCM, 44.1 kHz for best compatibility (ffmpeg can convert them):
+ffmpeg -i source.mp3 -ar 44100 -ac 2 -sample_fmt s16 evt_start.wav
+
