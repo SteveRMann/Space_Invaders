@@ -40,7 +40,14 @@
 #define PIN_BTN_RED 33
 #define PIN_BTN_GREEN 26
 #define PIN_BTN_WHITE 32
-#define PIN_BTN_CONTINUE 27  // <<< NEW Continue button- used to go to the next level
+#define PIN_BTN_CONTINUE 27  // <<< NEW Continue button- go to the next level
+
+// -----------------------------------------------------
+// NEW – colour‑hint GPIOs (external LEDs for the player)
+// -----------------------------------------------------
+#define PIN_HINT_RED 14
+#define PIN_HINT_BLUE 12
+#define PIN_HINT_GREEN 13
 
 #define CONFIG_VERSION 31
 #define FRAME_DELAY 16  // 16ms = approx. 60 FPS
@@ -254,6 +261,10 @@ unsigned long levelStartTime = 0;
 int levelMaxPossibleScore = 0;
 int levelAchievedScore = 0;
 
+// ----- NEW – colour‑hint state ------------------------------------------------
+int lastLeadColour = -1;       // colour of the front entity on the previous frame
+bool hintPending = false;      // true = we should light the appropriate hint LED
+bool hitJustOccurred = false;  // set to true only when a correct shot destroyed the front enemy
 
 
 // --------------------------------------------------------------------------
@@ -448,6 +459,13 @@ void drawMenu() {
   FastLED.show();
 }
 
+
+// Turn the hint LEDs off when the game ends
+void clearHintLEDs() {
+  digitalWrite(PIN_HINT_RED, LOW);
+  digitalWrite(PIN_HINT_BLUE, LOW);
+  digitalWrite(PIN_HINT_GREEN, LOW);
+}
 
 // --------------------------------------------------------------------------
 // 4. AUDIO ENGINE
@@ -653,6 +671,7 @@ void triggerBaseDestruction() {
   registerGameEnd(currentScore);
   currentState = STATE_BASE_DESTROYED;
   stateTimer = millis();
+  clearHintLEDs();
 }
 
 void calculateLevelScore() {
@@ -697,6 +716,7 @@ void checkWinCondition() {
       playSound(EVT_WIN);
       registerGameEnd(currentScore);
       currentState = STATE_GAME_FINISHED;
+      clearHintLEDs();
     } else {
       // ----- WIN THIS LEVEL ------------------
       playSound(EVT_WIN);
@@ -852,6 +872,7 @@ void updateBaseDestroyedAnim() {
     FastLED.show();
   } else {
     currentState = STATE_GAMEOVER;
+    clearHintLEDs();
   }
 }
 
@@ -1444,6 +1465,16 @@ void setup() {
   pinMode(PIN_BTN_WHITE, INPUT_PULLUP);
   pinMode(PIN_BTN_CONTINUE, INPUT_PULLUP);  // <<< NEW
 
+  // -------------------------------------------------
+  // NEW – initialise the hint LEDs (all OFF)
+  // -------------------------------------------------
+  pinMode(PIN_HINT_RED, OUTPUT);
+  pinMode(PIN_HINT_BLUE, OUTPUT);
+  pinMode(PIN_HINT_GREEN, OUTPUT);
+  digitalWrite(PIN_HINT_RED, LOW);
+  digitalWrite(PIN_HINT_BLUE, LOW);
+  digitalWrite(PIN_HINT_GREEN, LOW);
+
   setupDefaultConfig();
   preferences.begin("game", true);
   int storedVer = preferences.getInt("version", 0);
@@ -1561,8 +1592,6 @@ void setup() {
 }
 
 
-
-
 // ---------------------------------------------------------------------------
 // loop
 // ---------------------------------------------------------------------------
@@ -1571,35 +1600,16 @@ void loop() {
   if (now - lastLoopTime < FRAME_DELAY) return;
   lastLoopTime = now;
 
-  // Always process web requests
+  /* --------------------------------------------------------------
+     Always handle web requests (the tiny config UI)
+     -------------------------------------------------------------- */
   server.handleClient();
 
-  /*
-  if (wifiMode) {
-    server.handleClient();
-    static unsigned long lastWifiLedUpdate = 0;
-    if (now - lastWifiLedUpdate > 2000) {
-      lastWifiLedUpdate = now;
-      FastLED.clear();
-      for (int i = 0; i <= config_num_leds; i += 2) leds[i + ledStartOffset] = CRGB::Blue;
-      FastLED.show();
-    }
-    // EXIT WIFI MODE
-    if (digitalRead(PIN_BTN_WHITE) == LOW) {
-      delay(200);
-      ESP.restart();
-    }
-    return;
-  }
-*/
-
-  // 6. SETUP MODE FEEDBACK
-  // -----------------------------------------------------------------
-  //  WHITE BUTTON (GPIO 32) – Reset / Continue handling
-  // -----------------------------------------------------------------
-  if (digitalRead(PIN_BTN_WHITE) == LOW) {
-    // ---------- button pressed ----------
-    if (!btnWhiteHeld) {  // first edge
+  /* --------------------------------------------------------------
+     WHITE button (GPIO 32) – Reset / Continue handling
+     -------------------------------------------------------------- */
+  if (digitalRead(PIN_BTN_WHITE) == LOW) {               // button pressed
+    if (!btnWhiteHeld) {                                 // first edge
       btnWhiteHeld = true;
       btnWhitePressTime = now;
     } else {
@@ -1611,63 +1621,52 @@ void loop() {
             leds[i + ledStartOffset] = CRGB::Blue;
         }
         FastLED.show();
-        return;  // stay in Wi‑Fi mode until the button is released
+        return;                     // stay in Wi‑Fi mode until button is released
       }
     }
-  } else {
-    // ---------- button released ----------
-    if (btnWhiteHeld) {  // we just let go
+  } else {                         // button released
+    if (btnWhiteHeld) {            // we just let go
       unsigned long pressLen = now - btnWhitePressTime;
       btnWhiteHeld = false;
 
-      // ---- long press -> Wi‑Fi (safety net) ----
+      // ---- long press → Wi‑Fi (safety net) ----
       if (pressLen > 3000) {
         wifiMode = true;
-        enableWiFi();  // start AP + web‑UI
+        enableWiFi();              // start AP + web‑UI
         return;
       }
 
-      // ---- short press ----
-      ///      if (levelJustFinished) {
-      ///        // Still on the “you win” screen → go to the next level
-      ///        continueToNextLevel();
-      ///      } else {
-      // Normal situation → **full reset** for a fresh player
-      abortAndResetGame();  // <-- NEW – true full reset
-      return;               // *** stop processing the rest of loop() ***
+      // ---- short press → **full game reset** ----
+      abortAndResetGame();         // true full reset
+      return;                      // stop processing the rest of loop()
     }
   }
 
-
-  // -----------------------------------------------------------------
-  //  NEW: "Continue" button (GPIO27) – go to the next level
-  // -----------------------------------------------------------------
-  if (digitalRead(PIN_BTN_CONTINUE) == LOW) {  // button pressed
-    if (!btnContinueHeld) {                    // first edge
+  /* --------------------------------------------------------------
+     CONTINUE button (GPIO 27) – go to the next level (only when a
+     level has just been won)
+     -------------------------------------------------------------- */
+  if (digitalRead(PIN_BTN_CONTINUE) == LOW) {           // pressed
+    if (!btnContinueHeld) {                            // first edge
       btnContinueHeld = true;
       btnContinuePressTime = now;
     }
-    // (no long‑press behaviour – only a quick tap matters)
-  } else {                  // button released
-    if (btnContinueHeld) {  // we just let go
+  } else {                                              // released
+    if (btnContinueHeld) {                              // we just let go
       unsigned long holdTime = now - btnContinuePressTime;
       btnContinueHeld = false;
 
-      // -------------------------------------------------------------
-      // Only allow a transition when the game has just finished a level
-      // -------------------------------------------------------------
-      if (levelJustFinished && holdTime < 1000) {  // short tap
-        continueToNextLevel();                     // <<< NEW ACTION
+      if (levelJustFinished && holdTime < 1000) {        // short tap while win screen
+        continueToNextLevel();                           // start next level, keep score
       }
-      // (If the button is pressed at any other time we simply ignore it)
     }
   }
 
-  // -------------------------------------------------------------
-  // Light‑up the “sacrifice” LED while a level‑completion is waiting
-  // -------------------------------------------------------------
+  /* --------------------------------------------------------------
+     Blink the “sacrifice” LED (LED 0) while we are waiting on the
+     level‑completed screen
+     -------------------------------------------------------------- */
   if (levelJustFinished) {
-    // Blink the sacrificial LED (LED0) at 2Hz to hint the player
     static unsigned long lastBlink = 0;
     if (now - lastBlink >= 250) {
       lastBlink = now;
@@ -1678,7 +1677,9 @@ void loop() {
     }
   }
 
-
+  /* --------------------------------------------------------------
+     Quick‑return for the various non‑playing states
+     -------------------------------------------------------------- */
   if (currentState == STATE_LEVEL_COMPLETED) {
     updateLevelCompletedAnim();
     return;
@@ -1688,13 +1689,15 @@ void loop() {
     return;
   }
   if (currentState == STATE_GAME_FINISHED) {
-    for (int i = 0; i < config_num_leds; i++) leds[i + ledStartOffset] = CHSV((now / 10) + (i * 5), 255, 255);
+    for (int i = 0; i < config_num_leds; i++)
+      leds[i + ledStartOffset] = CHSV((now / 10) + (i * 5), 255, 255);
     if (config_sacrifice_led) leds[0] = CRGB(20, 0, 0);
     FastLED.show();
     return;
   }
   if (currentState == STATE_GAMEOVER) {
-    for (int i = 0; i < config_num_leds; i++) leds[i + ledStartOffset] = CRGB::Red;
+    for (int i = 0; i < config_num_leds; i++)
+      leds[i + ledStartOffset] = CRGB::Red;
     if (config_sacrifice_led) leds[0] = CRGB(20, 0, 0);
     FastLED.show();
     return;
@@ -1703,14 +1706,10 @@ void loop() {
     updateLevelIntro();
     return;
   }
-
-  // -----------------------------------------------------------------
-  // OPTIONAL MENU STATE – shows a simple “press white to continue”
-  // (Uncomment the block in `setup()` if you want a visual pause)
-  // -----------------------------------------------------------------
   if (currentState == STATE_MENU) {
     drawMenu();
-    // White‑button press while we are in the menu starts the next level
+    clearHintLEDs();           // force all hint LEDs OFF while in the menu
+    /* (the menu uses the white button to start the next level) */
     if (digitalRead(PIN_BTN_WHITE) == LOW && !btnWhiteHeld) {
       btnWhiteHeld = true;
       btnWhitePressTime = now;
@@ -1722,57 +1721,74 @@ void loop() {
     return;
   }
 
-
+  /* --------------------------------------------------------------
+     PLAYING / BOSS PLAYING – main game logic
+     -------------------------------------------------------------- */
   if (currentState == STATE_PLAYING || currentState == STATE_BOSS_PLAYING) {
-    bool b = (digitalRead(PIN_BTN_BLUE) == LOW);
-    bool r = (digitalRead(PIN_BTN_RED) == LOW);
+    /* ------------------  INPUT ------------------- */
+    bool b = (digitalRead(PIN_BTN_BLUE)  == LOW);
+    bool r = (digitalRead(PIN_BTN_RED)   == LOW);
     bool g = (digitalRead(PIN_BTN_GREEN) == LOW);
     bool isAnyBtnPressed = (b || r || g);
+
+    /* ---------------------------------------------------------
+       NEW PART – immediately turn OFF the hint LEDs whenever
+       **any** colour button is pressed (even if the colour is wrong)
+       ---------------------------------------------------------- */
+    bool buttonPressedThisFrame = isAnyBtnPressed;      // remember for later
+    if (buttonPressedThisFrame) {
+      // force all hint pins LOW right now
+      digitalWrite(PIN_HINT_RED,   LOW);
+      digitalWrite(PIN_HINT_BLUE,  LOW);
+      digitalWrite(PIN_HINT_GREEN, LOW);
+      // also clear the pending‑hint flag so the later logic cannot re‑turn it on
+      hintPending = false;
+    }
 
     if (!isAnyBtnPressed) {
       buttonsReleased = true;
       isWaitingForCombo = false;
     }
 
-    // INPUT HANDLING
-    if (currentBossType == 3) {
-      if (isAnyBtnPressed && buttonsReleased && !isWaitingForCombo && (now - lastFireTime > FIRE_COOLDOWN)) {
+    /* ------------------  INPUT HANDLING ------------------ */
+    if (currentBossType == 3) {                     // RGB Overlord – combo mode
+      if (isAnyBtnPressed && buttonsReleased && !isWaitingForCombo &&
+          (now - lastFireTime > FIRE_COOLDOWN)) {
         isWaitingForCombo = true;
         comboTimer = now;
       }
       if (isWaitingForCombo && (now - comboTimer >= INPUT_BUFFER_MS)) {
         int c = 0;
-        b = (digitalRead(PIN_BTN_BLUE) == LOW);
-        r = (digitalRead(PIN_BTN_RED) == LOW);
+        b = (digitalRead(PIN_BTN_BLUE)  == LOW);
+        r = (digitalRead(PIN_BTN_RED)   == LOW);
         g = (digitalRead(PIN_BTN_GREEN) == LOW);
         if (r && g && b) c = 7;
         else if (r && g) c = 4;
         else if (r && b) c = 5;
         else if (g && b) c = 6;
-        else if (b) c = 1;
-        else if (r) c = 2;
-        else if (g) c = 3;
-        if (c > 0) {
-          shots.push_back({ 0.0, c });
+        else if (b)      c = 1;
+        else if (r)      c = 2;
+        else if (g)      c = 3;
+        if (c) {
+          shots.push_back({0.0, c});
           stat_totalShots++;
-          stat_lastGameShots++;  // STATS UPDATE
-          saveHighscores();      // Persist shots? Maybe too often. Lets save at end of game/level.
+          stat_lastGameShots++;
           lastFireTime = now;
           playShotSound(c);
         }
         buttonsReleased = false;
         isWaitingForCombo = false;
       }
-    } else {
+    } else {                                        // normal enemies / other bosses
       if (isAnyBtnPressed && buttonsReleased && (now - lastFireTime > FIRE_COOLDOWN)) {
         int c = 0;
         if (b) c = 1;
         else if (r) c = 2;
         else if (g) c = 3;
-        if (c > 0) {
-          shots.push_back({ 0.0, c });
+        if (c) {
+          shots.push_back({0.0, c});
           stat_totalShots++;
-          stat_lastGameShots++;  // STATS UPDATE
+          stat_lastGameShots++;
           lastFireTime = now;
           playShotSound(c);
         }
@@ -1780,7 +1796,7 @@ void loop() {
       }
     }
 
-    // SHOT MOVEMENT
+    /* ------------------  SHOT MOVEMENT ------------------- */
     float moveStep = (float)config_shot_speed_pct / 60.0;
     moveStep = moveStep * 0.6;
     if (moveStep < 0.2) moveStep = 0.2;
@@ -1789,25 +1805,27 @@ void loop() {
       shots[i].position += moveStep;
       bool remove = false;
 
-      // HIT DETECTION
-      if (currentState == STATE_PLAYING) {
+      /* ===  HIT DETECTION  === */
+      if (currentState == STATE_PLAYING) {               // normal wave
         if (shots[i].position >= enemyFrontIndex && !enemies.empty()) {
-          if (shots[i].color == enemies[0].color) {
+          if (shots[i].color == enemies[0].color) {        // **correct hit**
             enemies.erase(enemies.begin());
-            stat_totalKills++;  // STATS
+            stat_totalKills++;
             enemyFrontIndex += 1.0;
             flashPixel((int)shots[i].position);
             remove = true;
             checkWinCondition();
-          } else {
-            enemies.insert(enemies.begin(), { shots[i].color, 0.0 });
+            hitJustOccurred = true;                     // tell hint logic
+          } else {                                        // wrong colour → penalty
+            enemies.insert(enemies.begin(),
+                           {shots[i].color, 0.0});
             enemyFrontIndex -= 1.0;
             remove = true;
             playSound(EVT_MISTAKE);
           }
         }
-      } else if (currentState == STATE_BOSS_PLAYING) {
-        // BOSS PROJECTILES COLLISION
+      } else if (currentState == STATE_BOSS_PLAYING) {   // boss fight
+        /* ----- boss projectiles ----- */
         for (int p = 0; p < bossProjectiles.size(); p++) {
           if (shots[i].position >= bossProjectiles[p].pos) {
             if (shots[i].color == bossProjectiles[p].color) {
@@ -1819,7 +1837,7 @@ void loop() {
           }
         }
 
-        // BOSS SEGMENT COLLISION
+        /* ----- boss segment collision ----- */
         if (!remove && shots[i].position >= enemyFrontIndex && !bossSegments.empty()) {
           int hitIndex = (int)(shots[i].position - enemyFrontIndex);
           if (hitIndex >= 0 && hitIndex < bossSegments.size()) {
@@ -1831,66 +1849,60 @@ void loop() {
               if (boss3State != B3_PHASE_CHANGE) vulnerable = true;
             }
 
-            if (vulnerable) {
-              if (shots[i].color == bossSegments[hitIndex].color) {
-                flashPixel((int)shots[i].position);
-                bossSegments[hitIndex].hp--;
-                if (bossSegments[hitIndex].hp <= 0) {
-                  bossSegments.erase(bossSegments.begin() + hitIndex);
-                  stat_totalKills++;  // STATS
-                  if (hitIndex == 0) enemyFrontIndex += 1.0;
-                  playSound(EVT_HIT_SUCCESS);
-                }
-                checkWinCondition();
+            if (vulnerable && shots[i].color == bossSegments[hitIndex].color) {
+              flashPixel((int)shots[i].position);
+              bossSegments[hitIndex].hp--;
+              if (bossSegments[hitIndex].hp <= 0) {
+                bossSegments.erase(bossSegments.begin() + hitIndex);
+                stat_totalKills++;
+                if (hitIndex == 0) enemyFrontIndex += 1.0;
+                playSound(EVT_HIT_SUCCESS);
+                hitJustOccurred = true;                 // tell hint logic
               }
+              checkWinCondition();
             }
             remove = true;
           }
         }
       }
+
       if (shots[i].position >= config_num_leds) remove = true;
       if (remove) shots.erase(shots.begin() + i);
     }
 
-    // ENEMY MOVEMENT
+    /* ------------------  ENEMY / BOSS MOVEMENT ------------------- */
     if (currentState == STATE_PLAYING) {
       float enemySpeed = (float)levels[currentLevel].speed;
       float eStep = enemySpeed / 60.0;
       enemyFrontIndex -= eStep;
-      if (enemyFrontIndex <= config_homebase_size) { triggerBaseDestruction(); }
-    } else if (currentState == STATE_BOSS_PLAYING) {
+      if (enemyFrontIndex <= config_homebase_size) triggerBaseDestruction();
+    } else { // STATE_BOSS_PLAYING
       int pSpeed = 60;
       if (currentBossType == 1) pSpeed = boss1Cfg.shotSpeed;
       if (currentBossType == 2) pSpeed = boss2Cfg.shotSpeed;
       moveBossProjectiles((float)pSpeed);
 
-      if (currentBossType == 1) {
+      if (currentBossType == 1) {               // Masterblaster
         float bStep = (float)boss1Cfg.moveSpeed / 60.0;
         enemyFrontIndex -= bStep;
-        if (enemyFrontIndex <= config_homebase_size) { triggerBaseDestruction(); }
+        if (enemyFrontIndex <= config_homebase_size) triggerBaseDestruction();
         if (now - bossActionTimer > (boss1Cfg.shotFreq * 100)) {
           bossActionTimer = now;
           int shotColor = 0;
-          int frontColor = 0;
-          if (bossSegments.size() > 0) frontColor = bossSegments[0].color;
-          if (random(100) < 20 && frontColor > 0) {
-            shotColor = frontColor;
-          } else {
-            do { shotColor = random(1, 4); } while (shotColor == frontColor && frontColor > 0);
-          }
-          bossProjectiles.push_back({ enemyFrontIndex, shotColor });
+          int frontColor = (bossSegments.size() ? bossSegments[0].color : 0);
+          if (random(100) < 20 && frontColor > 0) shotColor = frontColor;
+          else { do { shotColor = random(1, 4); } while (shotColor == frontColor && frontColor > 0); }
+          bossProjectiles.push_back({enemyFrontIndex, shotColor});
         }
-      } else if (currentBossType == 2) {
+      } else if (currentBossType == 2) {        // The Tank
         if (boss2State == B2_MOVE) {
           float bStep = (float)boss2Cfg.moveSpeed / 60.0;
           enemyFrontIndex -= bStep;
-          if (boss2Section < 3) {
-            if (enemyFrontIndex <= markerPos[boss2Section]) {
-              boss2State = B2_CHARGE;
-              bossActionTimer = now;
-            }
+          if (boss2Section < 3 && enemyFrontIndex <= markerPos[boss2Section]) {
+            boss2State = B2_CHARGE;
+            bossActionTimer = now;
           }
-          if (enemyFrontIndex <= config_homebase_size) { triggerBaseDestruction(); }
+          if (enemyFrontIndex <= config_homebase_size) triggerBaseDestruction();
         } else if (boss2State == B2_CHARGE) {
           if (now - bossActionTimer < (boss2Cfg.shotFreq * 100)) {
             if (now % 100 < 20) boss2LockedColor = random(1, 4);
@@ -1898,70 +1910,48 @@ void loop() {
             boss2State = B2_SHOOT;
             boss2ShotsFired = 0;
             bossActionTimer = now;
-            int startRange = 0;
-            int endRange = 0;
-            if (boss2Section == 0) {
-              startRange = 0;
-              endRange = 2;
-            } else if (boss2Section == 1) {
-              startRange = 0;
-              endRange = 5;
-            } else {
-              startRange = 0;
-              endRange = 8;
-            }
-            for (auto &seg : bossSegments) {
-              if (seg.originalIndex >= startRange && seg.originalIndex <= endRange) seg.color = boss2LockedColor;
-            }
+            int startRange = 0, endRange = 0;
+            if (boss2Section == 0) { startRange = 0; endRange = 2; }
+            else if (boss2Section == 1) { startRange = 0; endRange = 5; }
+            else { startRange = 0; endRange = 8; }
+            for (auto &seg : bossSegments)
+              if (seg.originalIndex >= startRange && seg.originalIndex <= endRange)
+                seg.color = boss2LockedColor;
           }
         } else if (boss2State == B2_SHOOT) {
           if (now - bossActionTimer > 150) {
             bossActionTimer = now;
-            bossProjectiles.push_back({ enemyFrontIndex, boss2LockedColor });
+            bossProjectiles.push_back({enemyFrontIndex, boss2LockedColor});
             boss2ShotsFired++;
             if (boss2ShotsFired >= 10) {
-              int startRange = 0;
-              int endRange = 0;
-              if (boss2Section == 0) {
-                startRange = 0;
-                endRange = 2;
-              } else if (boss2Section == 1) {
-                startRange = 3;
-                endRange = 5;
-              } else {
-                startRange = 0;
-                endRange = 8;
-              }
-              for (auto &seg : bossSegments) {
-                if (seg.originalIndex >= startRange && seg.originalIndex <= endRange) seg.active = true;
-              }
+              int startRange = 0, endRange = 0;
+              if (boss2Section == 0) { startRange = 0; endRange = 2; }
+              else if (boss2Section == 1) { startRange = 3; endRange = 5; }
+              else { startRange = 0; endRange = 8; }
+              for (auto &seg : bossSegments)
+                if (seg.originalIndex >= startRange && seg.originalIndex <= endRange)
+                  seg.active = true;
               boss2State = B2_MOVE;
               boss2Section++;
             }
           }
         }
-      } else if (currentBossType == 3) {
-        // --- LOGIC: SAFE FIRE ZONE ---
-        // Wenn Strip > 180 LEDs (echtes Setup), nicht mehr schießen ab LED 70.
-        // Wenn Strip <= 180 LEDs (Test/Notfall), schießen bis kurz vor die Basis (Basis + 5).
+      } else if (currentBossType == 3) {        // RGB Overlord
         float safeFireLimit = (config_num_leds > 180) ? 70.0 : (float)(config_homebase_size + 5);
 
-        // --- PHASE CHANGE TRIGGER ---
         if (boss3State == B3_MOVE && boss3PhaseIndex < 2 && enemyFrontIndex <= boss3Markers[boss3PhaseIndex]) {
           boss3State = B3_PHASE_CHANGE;
           bossActionTimer = now;
         }
 
-        // --- STATE HANDLING ---
         if (boss3State == B3_MOVE) {
           float bStep = (float)boss3Cfg.moveSpeed / 60.0;
           enemyFrontIndex -= bStep;
-          if (enemyFrontIndex <= config_homebase_size) { triggerBaseDestruction(); }
-
-          // CHECK: Nur schießen, wenn wir noch vor der Safe-Zone sind
-          if (enemyFrontIndex > safeFireLimit && boss3Cfg.shotFreq > 0 && (now - bossActionTimer > (boss3Cfg.shotFreq * 100))) {
+          if (enemyFrontIndex <= config_homebase_size) triggerBaseDestruction();
+          if (enemyFrontIndex > safeFireLimit && boss3Cfg.shotFreq > 0 &&
+              (now - bossActionTimer > (boss3Cfg.shotFreq * 100))) {
             bossActionTimer = now;
-            bossProjectiles.push_back({ enemyFrontIndex, (int)random(1, 4) });
+            bossProjectiles.push_back({enemyFrontIndex, random(1, 4)});
           }
         } else if (boss3State == B3_PHASE_CHANGE) {
           if (now - bossActionTimer > 4000) {
@@ -1974,9 +1964,8 @@ void loop() {
         } else if (boss3State == B3_BURST) {
           if (now - bossActionTimer > 200) {
             bossActionTimer = now;
-            // CHECK: Auch Burst-Attacken respektieren die Safe-Zone
             if (enemyFrontIndex > safeFireLimit) {
-              bossProjectiles.push_back({ enemyFrontIndex, (int)random(1, 8) });
+              bossProjectiles.push_back({enemyFrontIndex, random(1, 8)});
             }
             boss3BurstCounter++;
             if (boss3BurstCounter >= boss3Cfg.burstCount) {
@@ -1993,12 +1982,17 @@ void loop() {
       }
     }
 
+    /* --------------------------------------------------------------
+       DRAW the LED strip (unchanged)
+       -------------------------------------------------------------- */
     FastLED.clear();
+
+    // ---- optional visual markers for some bosses (unchanged) ----
     if (currentState == STATE_BOSS_PLAYING) {
       if (currentBossType == 2) {
-        for (int i = 0; i < 3; i++) {
-          if (markerPos[i] < enemyFrontIndex) leds[markerPos[i] + ledStartOffset] = CRGB(50, 0, 0);
-        }
+        for (int i = 0; i < 3; i++)
+          if (markerPos[i] < enemyFrontIndex)
+            leds[markerPos[i] + ledStartOffset] = CRGB(50, 0, 0);
       } else if (currentBossType == 3) {
         if (boss3PhaseIndex <= 0) {
           leds[boss3Markers[0] + ledStartOffset] = CRGB(50, 0, 0);
@@ -2010,17 +2004,21 @@ void loop() {
         }
       }
     }
+
+    // ---- normal enemies (wave) ----
     if (currentState == STATE_PLAYING) {
-      for (int i = 0; i < enemies.size(); i++) {
+      for (size_t i = 0; i < enemies.size(); i++) {
         float pos = enemyFrontIndex + (float)i;
         drawCrispPixel(pos, getColor(enemies[i].color));
       }
-    } else if (currentState == STATE_BOSS_PLAYING) {
-      for (int i = 0; i < bossSegments.size(); i++) {
+    }
+    // ---- boss segments ----
+    else if (currentState == STATE_BOSS_PLAYING) {
+      for (size_t i = 0; i < bossSegments.size(); i++) {
         float pos = enemyFrontIndex + (float)i;
-        if (pos < config_num_leds && pos >= 0) {
+        if (pos >= 0 && pos < config_num_leds) {
           CRGB c = getColor(bossSegments[i].color);
-          if (currentBossType == 2) {
+          if (currentBossType == 2) {                 // The Tank
             c = col_cb;
             if (boss2State == B2_MOVE) {
               if (bossSegments[i].active) {
@@ -2030,13 +2028,9 @@ void loop() {
             } else if (boss2State == B2_CHARGE || boss2State == B2_SHOOT) {
               int oid = bossSegments[i].originalIndex;
               bool highlight = false;
-              if (boss2Section == 0) {
-                if (oid >= 0 && oid <= 2) highlight = true;
-              } else if (boss2Section == 1) {
-                if (oid >= 0 && oid <= 5) highlight = true;
-              } else if (boss2Section >= 2) {
-                highlight = true;
-              }
+              if (boss2Section == 0 && oid >= 0 && oid <= 2) highlight = true;
+              else if (boss2Section == 1 && oid >= 0 && oid <= 5) highlight = true;
+              else if (boss2Section >= 2) highlight = true;
               if (highlight) c = getColor(boss2LockedColor);
             }
           } else if (currentBossType == 3 && boss3State == B3_PHASE_CHANGE) {
@@ -2045,15 +2039,66 @@ void loop() {
           drawCrispPixel(pos, c);
         }
       }
-      for (auto &p : bossProjectiles) {
+      // boss projectiles
+      for (auto &p : bossProjectiles)
         drawCrispPixel(p.pos, getColor(p.color));
-      }
     }
-    for (auto &s : shots) {
+
+    // ---- player shots ----
+    for (auto &s : shots)
       drawCrispPixel(s.position, getColor(s.color));
-    }
-    for (int i = 0; i < config_homebase_size; i++) leds[i + ledStartOffset] = CRGB::White;
+
+    // ---- home‑base (white) ----
+    for (int i = 0; i < config_homebase_size; i++)
+      leds[i + ledStartOffset] = CRGB::White;
+
+    // ---- sacrificial LED (red) ----
     if (config_sacrifice_led) leds[0] = CRGB(20, 0, 0);
+
+    /* --------------------------------------------------------------
+       **HINT‑LED UPDATE** – runs after all game logic but
+       **before** the strip is finally shown.
+       -------------------------------------------------------------- */
+    int leadColourNow = -1;
+    if (currentState == STATE_PLAYING && !enemies.empty())
+      leadColourNow = enemies.front().color;        // 1 = blue, 2 = red, 3 = green
+    else if (currentState == STATE_BOSS_PLAYING && !bossSegments.empty())
+      leadColourNow = bossSegments.front().color;   // may be 1‑6 (mix colours)
+
+    bool showHint = false;
+
+    // **IMPORTANT:** if the player pressed any button this frame we *must*
+    // keep the hint off, regardless of colour changes.
+    if (!buttonPressedThisFrame) {
+      if (leadColourNow != -1) {
+        if (leadColourNow != lastLeadColour) {               // colour changed
+          showHint = true;
+        } else if (hitJustOccurred && leadColourNow == lastLeadColour) { // we just killed it
+          showHint = true;
+        } else {
+          showHint = hintPending;                            // keep previous state
+        }
+      }
+    } else {
+      // button was pressed – keep hint off
+      showHint = false;
+    }
+
+    if (showHint) {
+      digitalWrite(PIN_HINT_RED,   (leadColourNow == 2) ? HIGH : LOW);
+      digitalWrite(PIN_HINT_BLUE,  (leadColourNow == 1) ? HIGH : LOW);
+      digitalWrite(PIN_HINT_GREEN, (leadColourNow == 3) ? HIGH : LOW);
+    } else {
+      digitalWrite(PIN_HINT_RED,   LOW);
+      digitalWrite(PIN_HINT_BLUE,  LOW);
+      digitalWrite(PIN_HINT_GREEN, LOW);
+    }
+
+    // remember for the next frame
+    hintPending    = showHint;
+    lastLeadColour = leadColourNow;
+    hitJustOccurred = false;          // reset for next loop
+
     FastLED.show();
   }
 }
