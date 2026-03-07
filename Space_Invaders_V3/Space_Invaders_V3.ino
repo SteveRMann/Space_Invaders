@@ -1,17 +1,16 @@
 // ==========================================================================
 // PROJECT: Space Invders - silent version
-// HARDWARE: ESP32-WROOM Devkit v1
-// CORE VERSION: 2.0.17 (Required?)
+// HARDWARE: ESP32D (ESP32 Dev Modile)
+// CORE VERSION: 2.0.17 (Required??)
 // This version strips the sound and 12s code.
 // V2 adds a "continue" button to go to the next level.
-// V3 adds "hint" LEDS
+// V3 adds "hint" LEDS, renamed White Button to Reset Button
 // ==========================================================================
 
 
 #include <WiFi.h>
 #include <WebServer.h>
 #include <Preferences.h>
-#include <driver/i2s.h>
 #include <vector>
 #include <Update.h>  // Fuer Web-OTA
 
@@ -24,13 +23,9 @@
 
 
 
-// --------------------------------------------------------------------------
+// ============================================================================
 // 1. DEFINITIONS & DATA TYPES
-// --------------------------------------------------------------------------
-#define I2S_BCLK 4
-#define I2S_LRC 5
-#define I2S_DOUT 6
-
+// ============================================================================
 #define PIN_LED_DATA 15
 #define MAX_LEDS 480
 #define LED_TYPE WS2812B
@@ -39,20 +34,16 @@
 #define PIN_BTN_BLUE 25
 #define PIN_BTN_RED 33
 #define PIN_BTN_GREEN 26
-#define PIN_BTN_WHITE 32
-#define PIN_BTN_CONTINUE 27  // <<< NEW Continue button- go to the next level
+#define PIN_BTN_WHITE 32     // Reset, start over
+#define PIN_BTN_CONTINUE 27  // Go to the next level
 
 // -----------------------------------------------------
-// NEW – colour‑hint GPIOs (external LEDs for the player)
+// Colour‑hint GPIOs (external LEDs for the player)
 // -----------------------------------------------------
 #define PIN_HINT_RED 14
 #define PIN_HINT_BLUE 12
 #define PIN_HINT_GREEN 13
-
-// --------------------------------------------------------------------------
-//  NEW – GPIO‑19 (extra status LED) that follows the sacrificial‑LED blink
-// --------------------------------------------------------------------------
-#define PIN_GPIO19_LED 19              // <<< the pin you will wire the LED to
+#define PIN_GPIO19_LED 19              // status LED- follows the sacrificial‑LED blink
 static unsigned long lastBlink19 = 0;  // timestamp of the last toggle
 static bool gpio19State = false;       // current level of GPIO19 (HIGH/LOW)
 
@@ -156,9 +147,9 @@ void saveHighscores();
 
 
 
-// --------------------------------------------------------------------------
+// ============================================================================
 // 2. GLOBAL VARIABLES
-// --------------------------------------------------------------------------
+// ============================================================================
 CRGB leds[MAX_LEDS];
 Preferences preferences;
 WebServer server(80);
@@ -199,7 +190,7 @@ CRGB col_c1, col_c2, col_c3, col_c4, col_c5, col_c6, col_cw, col_cb;
 Melody melStart, melWin, melLose, melMistake, melShotBlue, melShotRed, melShotGreen, melShotWhite, melHit;
 
 // Config
-int config_num_leds = 100;
+int config_num_leds = 475;
 int config_brightness_pct = 50;
 int config_start_level = 1;
 bool config_sacrifice_led = true;
@@ -275,17 +266,28 @@ bool hintPending = false;      // true = we should light the appropriate hint LE
 bool hitJustOccurred = false;  // set to true only when a correct shot destroyed the front enemy
 
 
-// --------------------------------------------------------------------------
+
+// ============================================================================
 // 3. HELPER FUNCTIONS
-// --------------------------------------------------------------------------
+// ============================================================================
+
+/* -------------------- hexToCRGB --------------------------
+   Converts a HTML style “#RRGGBB” colour string into a FastLED
+   CRGB value (red, green, blue components).
+--------------------------------------------------------------- */
 CRGB hexToCRGB(String hex) {
+  //Converts a HTML style “#RRGGBB” colour string into a FastLED CRGB value (red, green, blue components).
   long number = strtol(&hex[1], NULL, 16);
   return CRGB((number >> 16) & 0xFF, (number >> 8) & 0xFF, number & 0xFF);
 }
 
 bool levelJustFinished = false;  // <<< NEW – tells us we just won a level
 
-// -------------------- Melody --------------------
+
+/* -------------------- Melody ------------------------------------
+   Parses a semi colon separated list of “freq,duration” pairs 
+   into a std::vector<ToneCmd> (the internal melody representation).
+   ----------------------------------------------------------------*/
 Melody parseSoundString(String data) {
   Melody m;
   if (data.length() == 0) return m;
@@ -314,21 +316,24 @@ Melody parseSoundString(String data) {
   return m;
 }
 
-//-------------------- melody_FromStr --------------------
+/* -------------------- melody_FromStr --------------------
+   Convenience wrapper that replaces m with the result of
+   parseSoundString(s).
+   ----------------------------------------------------------- */
 void melodyFromStr(Melody &m, String s) {
   m = parseSoundString(s);
 }
 
-// ---------------------------------------------------------------------------
-//  abortAndResetGame() – complete wipe (keeps Wi‑Fi, OTA, colours, etc.)
-// ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
-// abortAndResetGame() – full wipe for a *new* player
-// ---------------------------------------------------------------------------
+
+
+/* ----------------  abortAndResetGame()-------------------
+   1️⃣  Erase all containers that belong to the current run
+   Full wipe for a *new* player. Completely wipes all runtime
+   containers (enemies, shots, bosses), resets all per run 
+   statistics and state flags, and starts the intro for the
+   configured start level.
+   -------------------------------------------------------- */
 void abortAndResetGame() {
-  // -------------------------------------------------
-  // 1️⃣  Erase all containers that belong to the current run
-  // -------------------------------------------------
   enemies.clear();
   shots.clear();
   bossSegments.clear();
@@ -389,9 +394,12 @@ void abortAndResetGame() {
 }
 
 
-// ---------------------------------------------------------------------------
-//  continueToNextLevel() – move to the next, harder level (keep score)
-// ---------------------------------------------------------------------------
+/* ---------------- continueToNextLevel()-----------------------
+   Mmove to the next, harder level (keep score)
+   Increments the level index, clears level specific containers, 
+   re initialises the appropriate boss or enemy wave, starts the
+   level intro animation and clears the just finished flag.
+   ------------------------------------------------------------ */
 void continueToNextLevel() {
   // 1️⃣  Advance the level index
   currentLevel++;
@@ -454,9 +462,11 @@ void continueToNextLevel() {
   levelJustFinished = false;
 }
 
-// ---------------------------------------------------------------------------
-//  Optional tiny menu visual (only used if you enable STATE_MENU)
-// ---------------------------------------------------------------------------
+/* ---------------- drawMenu()-----------------------------------
+   Optional tiny menu visual (only used if you enable STATE_MENU)
+   Simple visual “menu” animation that scrolls blue dots across the
+   strip while keeping the home base LEDs white.
+   ---------------------------------------------------------------- */
 void drawMenu() {
   FastLED.clear();
   for (int i = 0; i < config_num_leds; ++i) {
@@ -468,151 +478,40 @@ void drawMenu() {
 }
 
 
-// Turn the hint LEDs off when the game ends
+/* ---------------- clearHintLEDs() --------------------
+   Turn the hint LEDs off when the game ends
+   ------------------------------------------------------- */   
 void clearHintLEDs() {
   digitalWrite(PIN_HINT_RED, LOW);
   digitalWrite(PIN_HINT_BLUE, LOW);
   digitalWrite(PIN_HINT_GREEN, LOW);
 }
 
-// --------------------------------------------------------------------------
+
+// =========================================================================
 // 4. AUDIO ENGINE
-// --------------------------------------------------------------------------
+// =========================================================================
 void playSound(SoundEvent evt) {
   Serial.print("playSound= ");
   Serial.println(evt);
-  ///  if (!config_sound_on) return;
-  ///  ///Added test for null argument
-  ///  if (audioQueue == nullptr) {
-  ///    // Optional: debug
-  ///    Serial.println("playSound called but audioQueue is NULL");
-  ///    return;
-  ///  }
-  ///  xQueueSend(audioQueue, &evt, 0);
 }
+
 
 void playShotSound(int color) {
   Serial.print("playShotSound= ");
   Serial.println(color);
 }
-///  switch (color) {
-///    case 1: playSound(EVT_SHOT_BLUE); break;
-///    case 2: playSound(EVT_SHOT_RED); break;
-///    case 3: playSound(EVT_SHOT_GREEN); break;
-///    case 7: playSound(EVT_SHOT_WHITE); break;
-///    default: playSound(EVT_SHOT_BLUE); break;
-///  }
-///}
-
-/// Not used
-/*
-void playToneI2S(int freq, int durationMs) {
-  if (freq <= 0) {
-    size_t bytes_written;
-    int samples = (SAMPLE_RATE * durationMs) / 1000;
-    int16_t *buffer = (int16_t *)malloc(samples * 2);
-    memset(buffer, 0, samples * 2);
-    i2s_write(I2S_NUM_0, buffer, samples * 2, &bytes_written, portMAX_DELAY);
-    free(buffer);
-    return;
-  }
-  size_t bytes_written;
-  int samples = (SAMPLE_RATE * durationMs) / 1000;
-  int16_t *buffer = (int16_t *)malloc(samples * 2);
-  int halfPeriod = SAMPLE_RATE / freq / 2;
-
-  int16_t volume = map(config_volume_pct, 0, 100, 0, 10000);
-
-  for (int i = 0; i < samples; i++) {
-    buffer[i] = ((i / halfPeriod) % 2 == 0) ? volume : -volume;
-  }
-  i2s_write(I2S_NUM_0, buffer, samples * 2, &bytes_written, portMAX_DELAY);
-  free(buffer);
-}
-*/
-
-///Unused function
-///void audioTask(void *parameter) {
-///  return;
-///}
-
-/*
-  i2s_config_t i2s_config = {
-    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
-    .sample_rate = SAMPLE_RATE,
-    .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
-    .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
-    .communication_format = I2S_COMM_FORMAT_STAND_I2S,
-    .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-    .dma_buf_count = 4,
-    .dma_buf_len = 512,
-    .use_apll = false,
-    .tx_desc_auto_clear = true
-  };
-
-  i2s_pin_config_t pin_config = {
-    .bck_io_num = I2S_BCLK,
-    .ws_io_num = I2S_LRC,
-    .data_out_num = I2S_DOUT,
-    .data_in_num = I2S_PIN_NO_CHANGE
-  };
-
-  ///  i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
-  ///  i2s_set_pin(I2S_NUM_0, &pin_config);
-  ///  i2s_zero_dma_buffer(I2S_NUM_0);
-
-  const Melody *currentMelody = nullptr;
-  int noteIndex = 0;
-
-  while (true) {
-    SoundEvent newEvent;
-    if (xQueueReceive(audioQueue, &newEvent, 0) == pdTRUE) {
-      bool play = true;
-      if ((currentMelody == &melWin || currentMelody == &melLose) && newEvent != EVT_START) {
-        play = false;
-      }
-      if (play) {
-        switch (newEvent) {
-          case EVT_START: currentMelody = &melStart; break;
-          case EVT_SHOT_BLUE: currentMelody = &melShotBlue; break;
-          case EVT_SHOT_RED: currentMelody = &melShotRed; break;
-          case EVT_SHOT_GREEN: currentMelody = &melShotGreen; break;
-          case EVT_SHOT_WHITE: currentMelody = &melShotWhite; break;
-          case EVT_MISTAKE: currentMelody = &melMistake; break;
-          case EVT_HIT_SUCCESS: currentMelody = &melHit; break;
-          case EVT_WIN: currentMelody = &melWin; break;
-          case EVT_LOSE: currentMelody = &melLose; break;
-          default: break;
-        }
-        noteIndex = 0;
-        i2s_zero_dma_buffer(I2S_NUM_0);
-      }
-    }
-
-    if (currentMelody != nullptr) {
-      if (noteIndex >= currentMelody->size()) {
-        currentMelody = nullptr;
-        playToneI2S(0, 20);
-        i2s_zero_dma_buffer(I2S_NUM_0);
-      } else {
-        ToneCmd t = (*currentMelody)[noteIndex];
-        playToneI2S(t.freq, t.duration);
-        noteIndex++;
-      }
-    } else {
-      vTaskDelay(5 / portTICK_PERIOD_MS);
-    }
-    // Prevent watchdog reset
-    vTaskDelay(1);
-  }
-}
-*/
 
 
 
-// --------------------------------------------------------------------------
+// ==========================================================================
 // 5. GRAPHICS ENGINE
-// --------------------------------------------------------------------------
+// ==========================================================================
+
+/* ------------------ getColor --------------------
+   Returns the pre loaded CRGB for a logical colour
+   (1 = blue, 2 = red, …, 7 = white, default = black).
+   -------------------------------------------------- */
 CRGB getColor(int colorCode) {
   switch (colorCode) {
     case 1: return col_c1;
@@ -626,21 +525,37 @@ CRGB getColor(int colorCode) {
   }
 }
 
+
+/* ------------------ drawCrispPixel ----------------------
+   Rounds the floating LED position to the nearest pixel index
+   and writes the given colour into the LED buffer (if the index
+   is inside the strip).
+   ---------------------------------------------------------- */
 void drawCrispPixel(float pos, CRGB color) {
   int idx = round(pos);
   if (idx < 0 || idx >= config_num_leds) return;
   leds[idx + ledStartOffset] = color;
 }
 
+
+/* ------------------- flashPixel --------------------------
+   Temporarily lights the LED at pos white (used for hit flashes).
+   ---------------------------------------------------------- */
 void flashPixel(int pos) {
   if (pos >= 0 && pos < config_num_leds) leds[pos + ledStartOffset] = CRGB::White;
 }
 
 
 
-// --------------------------------------------------------------------------
+// ==========================================================================
 // 6. LOGIC & CONFIGURATION (MUST BE BEFORE SETUP)
-// --------------------------------------------------------------------------
+// ==========================================================================
+
+
+/* -------------------- saveHighscores ----------------------------------
+   Persists the high score, the three most recent game scores, and 
+   total‐shots/kills counters into the ESP32 NVS (Preferences).
+   ----------------------------------------------------------------------- */
 void saveHighscores() {
   preferences.begin("game", false);
   preferences.putInt((currentProfilePrefix + "hs").c_str(), highScore);
@@ -654,6 +569,8 @@ void saveHighscores() {
   preferences.end();
 }
 
+
+/* -------------------- loadHighscores ---------------------------------- */
 void loadHighscores() {
   preferences.begin("game", true);
   highScore = preferences.getInt((currentProfilePrefix + "hs").c_str(), 0);
@@ -665,6 +582,7 @@ void loadHighscores() {
   stat_totalKills = preferences.getULong("st_kills", 0);
   preferences.end();
 }
+
 
 void registerGameEnd(int finalScore) {
   lastGames[2] = lastGames[1];
@@ -763,6 +681,11 @@ void startLevelIntro(int level) {
   FastLED.show();
 }
 
+
+/* -------------------- drawLevelIntro ----------------------
+   Helper that draws the static bar used by the intro animation 
+   (used repeatedly while the intro timer runs).
+   ---------------------------------------------------------- */
 void drawLevelIntro(int level) {
   FastLED.clear();
   for (int i = 0; i < config_num_leds; i++) leds[i + ledStartOffset] = CRGB(5, 5, 5);
@@ -783,6 +706,12 @@ void drawLevelIntro(int level) {
   FastLED.show();
 }
 
+
+
+/* ----------------- updateLevelIntro ------------------------------
+   Drives the timed intro animation – flashing the bar, waiting 2 s, then 
+   initialising the enemy or boss data and switching to STATE_PLAYING/STATE_BOSS_PLAYING.
+   ----------------------------------------------------------------- */
 void updateLevelIntro() {
   unsigned long elapsed = millis() - stateTimer;
   if (elapsed > 2000 && elapsed < 4000) {
@@ -847,6 +776,11 @@ void updateLevelIntro() {
   }
 }
 
+
+/* ----------------- updateLevelCompletedAnim ----------------------------
+   Shows the “level cleared” animation: a solid colour for 1 s, then a progress
+   bar that visualises the ratio of achieved score to maximum possible score.
+   ----------------------------------------------------------------------- */
 void updateLevelCompletedAnim() {
   unsigned long elapsed = millis() - stateTimer;
   if (elapsed < 1000) {
@@ -866,6 +800,11 @@ void updateLevelCompletedAnim() {
   FastLED.show();
 }
 
+
+/* ----------------- updateBaseDestroyedAnim --------------------
+   Blinks the home base LEDs between red and white for 2 s, then
+   sets the state to STATE_GAMEOVER.
+   -------------------------------------------------------------- */
 void updateBaseDestroyedAnim() {
   unsigned long elapsed = millis() - stateTimer;
   if (elapsed < 2000) {
@@ -884,6 +823,11 @@ void updateBaseDestroyedAnim() {
   }
 }
 
+
+/* ------------------ moveBossProjectiles --------------------------------
+   Advances all active boss projectiles toward the home base at the given
+   speed; if any reach the base the game ends via triggerBaseDestruction().
+   ---------------------------------------------------------------------- */
 void moveBossProjectiles(float speed) {
   static unsigned long lastMove = 0;
   float step = (float)speed / 60.0;
@@ -899,9 +843,14 @@ void moveBossProjectiles(float speed) {
 
 
 
-// --------------------------------------------------------------------------
+// ==========================================================================
 // 7. CONFIG & WEB HANDLERS (MUST BE BEFORE SETUP)
-// --------------------------------------------------------------------------
+// ==========================================================================
+
+/* ------------------------ loadColors ------------------------------------
+   Reads saved hex colour strings from NVS, converts them with hexToCRGB,
+   and stores the resulting CRGB globals (col_c1, col_c2, …).
+   ------------------------------------------------------------------------ */
 void loadColors() {
   preferences.begin("colors", true);
   hex_c1 = preferences.getString("c1", "#0000FF");
@@ -924,6 +873,12 @@ void loadColors() {
   col_cb = hexToCRGB(hex_cb);
 }
 
+
+
+/* ----------------------- handleSaveColors --------------------------------
+   HTTP POST handler that receives new hex colour values, writes them to NVS,
+   reloads the colour globals, and redirects back to the colour page.
+   ------------------------------------------------------------------------- */
 void handleSaveColors() {
   if (server.hasArg("c1")) hex_c1 = server.arg("c1");
   if (server.hasArg("c2")) hex_c2 = server.arg("c2");
@@ -950,6 +905,11 @@ void handleSaveColors() {
   server.send(303);
 }
 
+
+/* ---------------------- loadSounds -----------------------------
+   Reads saved sound string definitions from NVS (or defaults)and
+   parses each into a Melody using melodyFromStr.
+------------------------------------------------------------------ */
 void loadSounds() {
   preferences.begin("snds", true);
   cfg_snd_start = preferences.getString("s_start", DEF_SND_START);
@@ -974,37 +934,12 @@ void loadSounds() {
   melodyFromStr(melShotWhite, cfg_snd_shot_w);
 }
 
-/// Flagged as not used
-/*
-void handleSaveSounds() {
-  cfg_snd_start = server.arg("s_start");
-  cfg_snd_win = server.arg("s_win");
-  cfg_snd_lose = server.arg("s_lose");
-  cfg_snd_mistake = server.arg("s_mistake");
-  cfg_snd_hit = server.arg("s_hit");
-  cfg_snd_shot_b = server.arg("s_shot_b");
-  cfg_snd_shot_r = server.arg("s_shot_r");
-  cfg_snd_shot_g = server.arg("s_shot_g");
-  cfg_snd_shot_w = server.arg("s_shot_w");
 
-  preferences.begin("snds", false);
-  preferences.putString("s_start", cfg_snd_start);
-  preferences.putString("s_win", cfg_snd_win);
-  preferences.putString("s_lose", cfg_snd_lose);
-  preferences.putString("s_mistake", cfg_snd_mistake);
-  preferences.putString("s_hit", cfg_snd_hit);
-  preferences.putString("s_shot_b", cfg_snd_shot_b);
-  preferences.putString("s_shot_r", cfg_snd_shot_r);
-  preferences.putString("s_shot_g", cfg_snd_shot_g);
-  preferences.putString("s_shot_w", cfg_snd_shot_w);
-  preferences.end();
 
-  loadSounds();
-  server.sendHeader("Location", "/sounds");
-  server.send(303);
-}
-*/
-
+/* ---------------------- applyProfileDefaults -------------------------
+   Fills the level  and boss configuration arrays with the default values 
+   for the three built in profiles (def_, kid_, pro_).
+   --------------------------------------------------------------------- */
 void applyProfileDefaults(String prefix) {
   if (prefix == "def_") {
     // STANDARD PROFILE
@@ -1048,6 +983,11 @@ void applyProfileDefaults(String prefix) {
   }
 }
 
+
+/* --------------- saveCurrentToPreferences ---------------------
+   Writes the current LED, brightness, start level, level data and
+   boss parameters into NVS under the given profile prefix.
+   ------------------------------------------------------------- */
 void saveCurrentToPreferences(String prefix) {
   preferences.begin("game", false);
   preferences.putInt((prefix + "leds").c_str(), config_num_leds);
@@ -1065,6 +1005,11 @@ void saveCurrentToPreferences(String prefix) {
   preferences.end();
 }
 
+
+/* ------------------ performFactoryReset ---------------------------
+   Erases all user settings, restores the three default profiles,
+   re applies them, and writes a fresh configuration version flag.
+   ------------------------------------------------------------------ */
 void performFactoryReset() {
   preferences.begin("game", true);
   String s = preferences.getString("ssid", "");
@@ -1122,6 +1067,7 @@ void setupDefaultConfig() {
 }
 
 void loadConfig(String prefix) {
+    // Convenience wrapper that simply loads the “standard” profile defaults (def_).
   preferences.begin("game", true);
   config_num_leds = preferences.getInt((prefix + "leds").c_str(), config_num_leds);
   config_brightness_pct = preferences.getInt((prefix + "bright").c_str(), config_brightness_pct);
@@ -1154,6 +1100,11 @@ void loadConfig(String prefix) {
   preferences.end();
 }
 
+
+/* --------------------- handleProfileSwitch --------------------------
+   HTTP POST handler that changes the active profile (def_, kid_, or pro_),
+   saves the selection, reloads defaults and redirects to the main page.
+   ---------------------------------------------------------------------*/
 void handleProfileSwitch() {
   if (server.hasArg("profile")) {
     String p = server.arg("profile");
@@ -1171,6 +1122,11 @@ void handleProfileSwitch() {
   } else server.send(400, "text/plain", "Bad Request");
 }
 
+
+/* ------------------- handleReset ---------------------
+   HTTP POST handler that runs performFactoryReset(), 
+   notifies the user and restarts the ESP.
+   ---------------------------------------------------------- */
 void handleReset() {
   performFactoryReset();
   server.send(200, "text/html", "<h2>Reset successful!</h2><p>Values & Scores wiped. ESP restarting.</p>");
@@ -1178,7 +1134,14 @@ void handleReset() {
   ESP.restart();
 }
 
+
+/* ------------------------ handleSave ----------------------------
+   HTTP POST handler for the main configuration page; parses all
+   form fields, validates LED count, stores the new settings in NVS,
+   and restarts the ESP to apply them.
+   --------------------------------------------------------------- */
 void handleSave() {
+  // HTTP POST handler that runs performFactoryReset(), notifies the user and restarts the ESP.
   if (server.hasArg("leds")) config_num_leds = server.arg("leds").toInt();
 
   // --- SANITIZE LED COUNT FROM UI ---
@@ -1260,6 +1223,11 @@ void handleSave() {
 }
 
 
+/* ------------------------- handleContinue ---------------------------
+   HTTP POST handler for the “/next” endpoint; if a level was just won
+   (levelJustFinished == true) it calls continueToNextLevel() and
+   returns a 200 response, otherwise a 400 error.
+   ------------------------------------------------------------------- */
 void handleContinue() {
   if (levelJustFinished) {
     continueToNextLevel();
@@ -1271,6 +1239,7 @@ void handleContinue() {
 
 
 String getUpdateHTML() {
+  // Returns the full HTML page used for OTA firmware updates (file upload form).
   String h = "<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>";
   h += "<title>Firmware Update</title>";
   h += "<style>body{font-family:sans-serif;background:#111;color:#eee;padding:20px;max-width:600px;margin:auto;} h2{color:#0f0;} input{width:100%;margin-bottom:10px;padding:10px;}</style>";
@@ -1281,7 +1250,9 @@ String getUpdateHTML() {
   return h;
 }
 
+
 String getColorHTML() {
+  // Returns the HTML page that lets the user pick custom colours for enemies, bosses, and player shots.
   String h = "<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>";
   h += "<title>Color Config</title>";
   h += "<style>body{font-family:sans-serif;background:#111;color:#eee;padding:10px;max-width:800px;margin:auto;}input,button{width:100%;background:#333;color:#fff;border:1px solid #555;padding:8px;border-radius:4px;box-sizing:border-box;margin-bottom:5px;} .sec{margin-top:15px;border-top:1px solid #555;padding-top:15px;background:#222;padding:15px;border-radius:5px;} h3{margin-top:0;color:#0f0;} input[type=color] { height: 50px; cursor: pointer; } a { color: #00ff00; text-decoration: none; }</style>";
@@ -1309,6 +1280,11 @@ String getColorHTML() {
   return h;
 }
 
+
+/* ------------------------ getSoundHTML -------------------------
+   Returns the HTML page that lets the user edit the frequency/duration
+   strings for the various game sound events.
+---------------------------------------------------------------- */
 String getSoundHTML() {
   String h = "<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>";
   h += "<title>Sound Config</title>";
@@ -1334,6 +1310,10 @@ String getSoundHTML() {
   return h;
 }
 
+/* -------------------------------- getHTML -------------------------------
+   Returns the main configuration web page (LED count, brightness, Wi Fi,
+   level table, boss parameters, stats, and navigation links).
+   --------------------------------------------------------------- */
 String getHTML() {
   String h = "<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>";
   h += "<title>Ultimate RGB Invaders</title>";
@@ -1434,6 +1414,11 @@ String getHTML() {
   return h;
 }
 
+
+/* ---------------------------- enableWiFi ----------------------------------------
+   Starts the ESP32 in AP+STA mode, connects to the configured Wi Fi network (if any),
+   launches the captive AP “ESP RGB INVADERS”, and starts the HTTP server.
+   -------------------------------------------------------------------------------- */
 void enableWiFi() {
   FastLED.clear();
   FastLED.show();
@@ -1452,9 +1437,9 @@ void enableWiFi() {
 }
 
 
-// --------------------------------------------------------------------------
+// ==========================================================================
 // 8. SETUP
-// --------------------------------------------------------------------------
+// ==========================================================================
 void setup() {
 
   /*
@@ -1603,9 +1588,9 @@ void setup() {
 }
 
 
-// ---------------------------------------------------------------------------
+// ============================================================================
 // loop
-// ---------------------------------------------------------------------------
+// ============================================================================
 void loop() {
   unsigned long now = millis();
   if (now - lastLoopTime < FRAME_DELAY) return;
