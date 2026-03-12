@@ -19,7 +19,8 @@
 // UDP
 #include <WiFiUdp.h>
 WiFiUDP udp;  // Create a UDP object
-const char *SOUND_SERVER_IP = "192.168.1.150";
+//const char *SOUND_SERVER_IP = "192.168.1.150";
+const char *SOUND_SERVER_IP = "sandbox.local";
 const int SOUND_SERVER_PORT = 5005;
 
 
