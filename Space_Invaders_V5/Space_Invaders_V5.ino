@@ -1571,6 +1571,11 @@ void setup() {
 
   preferences.begin("game", true);
   currentProfilePrefix = preferences.getString("act_prof", "def_");
+  String wifiSsid = preferences.getString("ssid", "");
+  String wifiPass = preferences.getString("pass", "");
+  wifiSsid.trim();
+  wifiPass.trim();
+
   preferences.end();
 
   loadConfig(currentProfilePrefix);
@@ -1587,7 +1592,6 @@ void setup() {
   // 3. FASTLED
   // -----------------------------
   Serial.println("SETUP: FastLED");
-
   FastLED.addLeds<LED_TYPE, PIN_LED_DATA, COLOR_ORDER>(leds, config_num_leds + 1);
   FastLED.setBrightness(map(config_brightness_pct, 10, 100, 25, 255));
   FastLED.setDither(0);
@@ -1597,7 +1601,7 @@ void setup() {
   FastLED.show();
 
   // -----------------------------
-  // 4. GAME STARTUP
+  // 4. GAME STARTUP (NO UDP / SOUND YET)
   // -----------------------------
   Serial.println("SETUP: 4. Game Startup");
   startLevelIntro(config_start_level);
@@ -1608,42 +1612,79 @@ void setup() {
   FastLED.show();
   delay(500);
 
-  // -----------------------------
-  // 5. WIFI (MUST COME BEFORE SERVER)
-  // -----------------------------
-  // Serial.println("SETUP: 5. WiFi begin");
+  // -------------------------------------
+  // 5. WIFI (MUST COME BEFORE SERVER/UDP)
+  // -------------------------------------
+  Serial.println("SETUP: 5. WiFi begin");
+
+  if (wifiSsid.length() == 0) {
+    // No stored credentials → AP mode for config
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP("InvadersSetup", "12345678");
+    Serial.print("AP IP: ");
+    Serial.println(WiFi.softAPIP());
+  } else {
+
+    // Debug
+    Serial.print("SSID from prefs: '");
+    Serial.print(wifiSsid);
+    Serial.println("'");
+
+    Serial.print("PASS from prefs: '");
+    Serial.print(wifiPass);
+    Serial.println("'");
+
+    // Try STA with stored credentials
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(wifiSsid.c_str(), wifiPass.c_str());
+
+    Serial.print("Connecting to WiFi");
+    unsigned long start = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - start < 8000) {
+      delay(200);
+      Serial.print(".");
+    }
+    Serial.println();
+
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.print("IP: ");
+      Serial.println(WiFi.localIP());
+      Serial.print("MAC: ");
+      Serial.println(WiFi.macAddress());
+    } else {
+      // Fallback to AP if STA fails
+      Serial.println("WiFi STA failed, starting AP");
+      WiFi.mode(WIFI_AP);
+      WiFi.softAP("InvadersSetup", "12345678");
+      Serial.print("AP IP: ");
+      Serial.println(WiFi.softAPIP());
+    }
+  }
 
 
   // -----------------------------
   // 6. CREATE WEB SERVER
   // -----------------------------
   Serial.println("SETUP: Creating WebServer");
-
   server = new WebServer(80);
 
   // ROUTES
   server->on("/", []() {
     server->send(200, "text/html", getHTML());
   });
-
   server->on("/save", handleSave);
   server->on("/loadprofile", handleProfileSwitch);
   server->on("/reset", handleReset);
-
   server->on("/sounds", []() {
     server->send(200, "text/html", getSoundHTML());
   });
-
   server->on("/colors", []() {
     server->send(200, "text/html", getColorHTML());
   });
-
   server->on("/savecolors", handleSaveColors);
-
   server->on("/update", HTTP_GET, []() {
     server->send(200, "text/html", getUpdateHTML());
   });
-
   server->on(
     "/update", HTTP_POST,
     []() {
@@ -1663,7 +1704,6 @@ void setup() {
         else Update.printError(Serial);
       }
     });
-
   server->on("/next", HTTP_POST, handleContinue);
 
   // -----------------------------
@@ -1675,11 +1715,12 @@ void setup() {
   // -----------------------------
   // 8. START UDP
   // -----------------------------
-  udp.begin(4210);  // any local port is fine
+  udp.begin(4210);
   Serial.println("UDP ready");
 
   Serial.println("SETUP: end");
 }
+
 
 
 
