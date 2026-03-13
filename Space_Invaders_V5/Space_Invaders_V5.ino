@@ -502,15 +502,13 @@ void clearHintLEDs() {
 // =========================================================================
 // 4. AUDIO ENGINE
 // =========================================================================
-void playToneUDP(int freq, int duration) {
-  if (WiFi.status() != WL_CONNECTED) return;  // prevent early crash
-  char msg[32];
-  snprintf(msg, sizeof(msg), "%d,%d", freq, duration);
-
+void playToneUDP(String seq) {
+ if (WiFi.status() != WL_CONNECTED) return;  // prevent early crash
   udp.beginPacket(SOUND_SERVER_IP, SOUND_SERVER_PORT);
-  udp.write((uint8_t *)msg, strlen(msg));
+  udp.print(seq);              // send the whole string
   udp.endPacket();
 }
+
 
 
 
@@ -520,73 +518,97 @@ void playSound(SoundEvent evt) {
   switch (evt) {
     case 1:  //START
       Serial.println(" Start");
-      playToneUDP(523, 80);
-      playToneUDP(659, 80);
-      playToneUDP(784, 80);
-      playToneUDP(1047, 300);
+//      Serial.print("cfg_snd_start=");
+//      Serial.println(cfg_snd_start);
+      playToneUDP(cfg_snd_start);
+      //      playToneUDP(523, 80);
+      //      playToneUDP(659, 80);
+      //      playToneUDP(784, 80);
+      //      playToneUDP(1047, 300);
       break;
 
     case 2:  //WIN
       Serial.println(" Win");
-      playToneUDP(523, 80);
-      playToneUDP(659, 80);
-      playToneUDP(784, 80);
-      playToneUDP(1047, 300);
-      playToneUDP(0, 150);
-      playToneUDP(1047, 60);
-      playToneUDP(1319, 60);
+//      Serial.print("cfg_snd_win=");
+//      Serial.println(cfg_snd_win);
+      playToneUDP(cfg_snd_win);
+      //      playToneUDP(523, 80);
+      //      playToneUDP(659, 80);
+      //      playToneUDP(784, 80);
+      //      playToneUDP(1047, 300);
+      //      playToneUDP(0, 150);
+      //      playToneUDP(1047, 60);
+      //      playToneUDP(1319, 60);
       break;
 
     case 3:  //LOSE
       Serial.println(" Lose");
-      playToneUDP(370, 100);
-      playToneUDP(349, 100);
-      playToneUDP(330, 100);
-      playToneUDP(311, 400);
+//      Serial.print("cfg_snd_lose=");
+//      Serial.println(cfg_snd_lose);
+      playToneUDP(cfg_snd_lose);
+      //      playToneUDP(370, 100);
+      //      playToneUDP(349, 100);
+      //      playToneUDP(330, 100);
+      //      playToneUDP(311, 400);
       break;
 
     case 4:  //MISTAKE
       Serial.println(" Mistake");
-      playToneUDP(60, 250);
+//      Serial.print("cfg_snd_mistake=");
+//      Serial.println(cfg_snd_mistake);
+      playToneUDP(cfg_snd_mistake);
+      //      playToneUDP(60, 250);
       break;
 
     case 5:  //HIT
       Serial.println(" Hit");
-      playToneUDP(2093, 60);
+//      Serial.print("cfg_snd_hit=");
+//      Serial.println(cfg_snd_hit);
+      playToneUDP(cfg_snd_hit);
+      //      playToneUDP(2093, 60);
       break;
 
     default:
       Serial.println(" Unknown");
-      playToneUDP(100, 750);
+      playToneUDP("100, 750");
   }
 }
 
 void playShotSound(int color) {
   Serial.print("playShotSound= ");
   Serial.print(color);
-  playToneUDP(800, 250);
+  //playToneUDP(800, 250);
 
   switch (color) {
     case 1:  //Blue button
       Serial.println(" Blue btn");
-      playToneUDP(698, 50);
-      playToneUDP(659, 50);
+//      Serial.print("cfg_snd_shot_b=");
+//      Serial.println(cfg_snd_shot_b);
+      playToneUDP(cfg_snd_shot_b);
+      //      playToneUDP(698, 50);
+      //      playToneUDP(659, 50);
       break;
     case 2:  //Red button
       Serial.println(" Red btn");
-      playToneUDP(784, 30);
-      playToneUDP(1047, 30);
-      playToneUDP(1319, 30);
+//      Serial.print("cfg_snd_shot_r=");
+//      Serial.println(cfg_snd_shot_r);
+      playToneUDP(cfg_snd_shot_r);
+      //      playToneUDP(784, 30);
+      //      playToneUDP(1047, 30);
+      //      playToneUDP(1319, 30);
       break;
     case 3:  //Green button
       Serial.println(" Green btn");
-      playToneUDP(523, 30);
-      playToneUDP(554, 30);
-      playToneUDP(523, 30);
+//      Serial.print("cfg_snd_shot_g=");
+//      Serial.println(cfg_snd_shot_g);
+      playToneUDP(cfg_snd_shot_g);
+      //      playToneUDP(523, 30);
+      //      playToneUDP(554, 30);
+      //      playToneUDP(523, 30);
       break;
     default:
       Serial.println(" Unknown btn");
-      playToneUDP(100, 750);
+      playToneUDP("100, 750");
   }
 }
 
