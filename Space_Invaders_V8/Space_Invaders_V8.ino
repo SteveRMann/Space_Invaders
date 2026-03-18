@@ -1400,27 +1400,75 @@ void handleContinue() {
 }
 
 
-
+/*
 String getUpdateHTML() {
   String h = "<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>";
   h += "<title>Firmware Update</title>";
   h += "<style>";
   h += "body { font-family: sans-serif; background: #111; color: #eee; padding: 20px; max-width: 600px; margin: auto; }";
   h += "h2 { color: #0f0; }";
+  h += "#status { margin: 20px 0; font-size: 1.2em; }";
+  h += ".dots::after { content: ''; animation: dots 1.5s infinite; }";
+  h += "@keyframes dots { 0%, 20% { content: '.'; } 40% { content: '..'; } 60% { content: '...'; } 80%,100% { content: ''; } }";
   h += "</style>";
   h += "</head><body>";
-  h += "<h2>SYSTEM UPDATE</h2>";
-  h += "<p>Upload a new .bin file from the Arduino IDE (Sketch -> Export Compiled Binary).</p>";
-
-  h += "<form method='POST' action='/update' enctype='multipart/form-data'>";
+  h += "<h2>FIRMWARE UPDATE</h2>";
+  h += "<p>Upload .bin file from Arduino IDE</p>";
+  h += "<form id='uploadForm' method='POST' action='/update' enctype='multipart/form-data'>";
   h += "<input type='file' name='update'><br><br>";
-  h += "<button type='submit' style='padding:15px;background:#00f;color:white;font-weight:bold;width:100%;cursor:pointer;'>UPDATE FIRMWARE</button>";
+  h += "<button type='submit'>UPDATE FIRMWARE</button>";
   h += "</form>";
+  h += "<div id='status'></div>";
+  h += "<br><a href='/'>Back to Main Menu</a>";
 
-  h += "<br><a href='/' style='color:#0f0;'>Back to Main Menu</a>";
+  h += "<script>";
+  h += "document.getElementById('uploadForm').addEventListener('submit', function(e) {";
+  h += "  document.getElementById('status').innerHTML = 'Uploading<span class=\"dots\"></span>';";
+  h += "  // That's it! The browser will show the upload progress naturally";
+  h += "});";
+  h += "</script>";
+
   h += "</body></html>";
-
   return h;
+}
+*/
+
+
+String getUpdateHTML() {
+  return R"(
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset='UTF-8'>
+    <meta name='viewport' content='width=device-width, initial-scale=1.0'>
+    <title>Firmware Update</title>
+    <style>
+        body { font-family: sans-serif; background: #111; color: #eee; padding: 20px; max-width: 600px; margin: auto; }
+        h2 { color: #0f0; }
+        #status { margin: 20px 0; font-size: 1.2em; }
+    </style>
+</head>
+<body>
+    <h2>FIRMWARE UPDATE</h2>
+    <p>Upload .bin file from Arduino IDE</p>
+    
+    <form method='POST' action='/update' enctype='multipart/form-data'>
+        <input type='file' name='update'><br><br>
+        <button type='submit'>UPDATE FIRMWARE</button>
+    </form>
+    
+    <div id='status'></div>
+    <br><a href='/'>Back to Main Menu</a>
+    
+    <script>
+        document.querySelector('form').addEventListener('submit', function() {
+            document.getElementById('status').textContent = 'Upload in progress...';
+            // The browser will naturally show upload progress in the status bar
+        });
+    </script>
+</body>
+</html>
+)";
 }
 
 
@@ -1835,29 +1883,28 @@ void setup() {
 
       if (upload.status == UPLOAD_FILE_START) {
         Serial.printf("Update: %s\n", upload.filename.c_str());
-        if (!upload.filename.endsWith(".bin")) {
-          return;
-        }
-        Serial.println("Update starting...");
+        if (!upload.filename.endsWith(".bin")) return;
 
         uint32_t maxSketchSpace = (ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000;
         if (!Update.begin(maxSketchSpace, U_FLASH)) {
           Update.printError(Serial);
         }
       } else if (upload.status == UPLOAD_FILE_WRITE) {
-        if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
-          Update.printError(Serial);
+        Update.write(upload.buf, upload.currentSize);
+
+        // Simple progress to serial
+        static unsigned long lastProgress = 0;
+        if (millis() - lastProgress > 1000) {
+          Serial.printf("Uploaded: %d bytes\n", upload.totalSize);
+          lastProgress = millis();
         }
       } else if (upload.status == UPLOAD_FILE_END) {
-        if (Update.end(true)) {
-          Serial.printf("Update Success: %u bytes\n", upload.totalSize);
-        } else {
-          Update.printError(Serial);
-        }
+        Update.end(true);
       }
 
       yield();
     });
+
 
 
 
