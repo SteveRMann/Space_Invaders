@@ -394,6 +394,16 @@ void abortAndResetGame() {
   comboTimer = 0;
 
   // -------------------------------------------------
+  // Reset the hint LEDs
+  // -------------------------------------------------
+  if (HINT) {
+    clearHintLEDs();
+  } else {
+    hintLEDsON();
+  }
+
+
+  // -------------------------------------------------
   // 3️⃣  Reset the *campaign* variables
   // -------------------------------------------------
   // Use the start‑level the user set in the web UI.
@@ -489,6 +499,15 @@ void continueToNextLevel() {
   // 6️⃣  Kick off the level‑intro animation (so the player sees the new bar)
   startLevelIntro(currentLevel);
 
+  // -------------------------------------------------
+  // Reset the hint LEDs
+  // -------------------------------------------------
+  if (HINT) {
+    clearHintLEDs();
+  } else {
+    hintLEDsON();
+  }
+
   // 7️⃣  We are no longer “just‑finished”; clear the flag.
   levelJustFinished = false;
 }
@@ -510,12 +529,22 @@ void drawMenu() {
 
 
 /* ---------------- clearHintLEDs() --------------------
-   Turn the hint LEDs off when the game ends
+   Turn the hint LEDs OFF
    ------------------------------------------------------- */
 void clearHintLEDs() {
   digitalWrite(PIN_HINT_RED, LOW);
   digitalWrite(PIN_HINT_BLUE, LOW);
   digitalWrite(PIN_HINT_GREEN, LOW);
+}
+
+
+/* ---------------- hintLEDsON() --------------------
+   Turn the hint LEDs ON
+   ------------------------------------------------------- */
+void hintLEDsON() {
+  digitalWrite(PIN_HINT_RED, HIGH);
+  digitalWrite(PIN_HINT_BLUE, HIGH);
+  digitalWrite(PIN_HINT_GREEN, HIGH);
 }
 
 
@@ -1393,11 +1422,26 @@ void handleSave() {
 void handleContinue() {
   if (levelJustFinished) {
     continueToNextLevel();
-    server->send(200, "text/plain", "Next level started");
+
+    String responsePage = "<html><head><meta http-equiv='refresh' content='2;url=/'></head>";
+    responsePage += "<body style='font-family: sans-serif; background: #111; color: #eee; padding: 20px; text-align: center;'>";
+    responsePage += "<h2 style='color: #0f0;'>🎮 LEVEL " + String(currentLevel) + " STARTED!</h2>";
+    responsePage += "<p>Returning to main page...</p>";
+    responsePage += "</body></html>";
+
+    server->send(200, "text/html", responsePage);
   } else {
-    server->send(400, "text/plain", "No finished level to continue");
+    String errorPage = "<html><head><meta http-equiv='refresh' content='3;url=/'></head>";
+    errorPage += "<body style='font-family: sans-serif; background: #111; color: #eee; padding: 20px; text-align: center;'>";
+    errorPage += "<h2 style='color: red;'>❌ NO LEVEL TO CONTINUE</h2>";
+    errorPage += "<p>Returning to main page...</p>";
+    errorPage += "</body></html>";
+
+    server->send(200, "text/html", errorPage);
   }
 }
+
+
 
 
 /*

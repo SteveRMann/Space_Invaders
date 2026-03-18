@@ -11,3 +11,4 @@
 *.lnk
 *.gcode
 build/
+temp/
