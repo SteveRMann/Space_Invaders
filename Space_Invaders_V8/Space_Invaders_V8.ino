@@ -1873,9 +1873,30 @@ void setup() {
     "/update", HTTP_POST,
     []() {
       server->sendHeader("Connection", "close");
-      server->send(200, "text/plain",
-                   (Update.hasError()) ? "UPDATE FAILED" : "UPDATE SUCCESS! RESTARTING...");
-      delay(1000);
+
+      if (Update.hasError()) {
+        // Error page with auto-redirect
+        String errorPage = "<html><head><meta http-equiv='refresh' content='3;url=/'></head>";
+        errorPage += "<body style='font-family: sans-serif; background: #111; color: #eee; padding: 20px; text-align: center;'>";
+        errorPage += "<h2 style='color: red;'>❌ UPDATE FAILED</h2>";
+        errorPage += "<p>Returning to main page in 3 seconds...</p>";
+        errorPage += "<p><a href='/' style='color: #0f0;'>Click here if not redirected</a></p>";
+        errorPage += "</body></html>";
+        server->send(200, "text/html", errorPage);
+      } else {
+        // Success page with auto-redirect
+        String successPage = "<html><head><meta http-equiv='refresh' content='3;url=/'></head>";
+        successPage += "<body style='font-family: sans-serif; background: #111; color: #eee; padding: 20px; text-align: center;'>";
+        successPage += "<h2 style='color: #0f0;'>UPDATE SUCCESSFUL!</h2>";
+        successPage += "<p>Device restarting... You'll be redirected to the main page.</p>";
+        successPage += "<p><a href='/' style='color: #0f0;'>Click here if not redirected</a></p>";
+        successPage += "</body></html>";
+        server->send(200, "text/html", successPage);
+
+        Serial.println("Update successful! Restarting in 3 seconds...");
+        delay(3000);  // Show message for 3 seconds
+      }
+
       ESP.restart();
     },
     []() {
@@ -1891,19 +1912,13 @@ void setup() {
         }
       } else if (upload.status == UPLOAD_FILE_WRITE) {
         Update.write(upload.buf, upload.currentSize);
-
-        // Simple progress to serial
-        static unsigned long lastProgress = 0;
-        if (millis() - lastProgress > 1000) {
-          Serial.printf("Uploaded: %d bytes\n", upload.totalSize);
-          lastProgress = millis();
-        }
       } else if (upload.status == UPLOAD_FILE_END) {
         Update.end(true);
       }
 
       yield();
     });
+
 
 
 
