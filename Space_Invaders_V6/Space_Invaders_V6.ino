@@ -7,6 +7,7 @@
 // V3 adds "hint" LEDS, renamed White Button to Reset Button
 // V4 Adds UDP commands to play sounds
 // V5 Restores web page to set WiFi Credentials
+// V6 Adds debounce to the RGB buttons.
 // ==========================================================================
 
 

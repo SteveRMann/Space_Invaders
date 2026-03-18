@@ -10,3 +10,4 @@
 *.sch
 *.lnk
 *.gcode
+build/

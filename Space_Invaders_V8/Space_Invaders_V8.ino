@@ -7,6 +7,10 @@
 // V3 adds "hint" LEDS, renamed White Button to Reset Button
 // V4 Adds UDP commands to play sounds
 // V5 Restores web page to set WiFi Credentials
+// V6 Adds debounce to the RGB buttons.
+// V7 Replace UDP Sound Functions with tone()
+//    Add missed sprites to the END of the enemy array.
+// V8 Fixed upload problem, added hint option.
 // ==========================================================================
 
 
@@ -14,20 +18,22 @@
 #include <WebServer.h>
 #include <Preferences.h>
 #include <vector>
-#include <Update.h>  // Fuer Web-OTA
+#include <Update.h>          // Fuer Web-OTA
+#include "esp32-hal-ledc.h"  // For tone function
+
 
 
 // UDP
 #include <WiFiUdp.h>
 WiFiUDP udp;  // Create a UDP object
 //const char *SOUND_SERVER_IP = "192.168.1.150";
-const char *SOUND_SERVER_IP = "sandbox.local";
-const int SOUND_SERVER_PORT = 5005;
+//const char *SOUND_SERVER_IP = "sandbox.local";
+//const int SOUND_SERVER_PORT = 5005;
+const char *EVENT_SERVER_IP = "192.168.1.150";  // Your NUC IP
+const int EVENT_SERVER_PORT = 5006;             // Different port for events
 
 
 // --- LED CONFIGURATION ---
-///#define FASTLED_ESP32_S3_PIN 7
-///#define FASTLED_RMT_MAX_CHANNELS 1
 #include <FastLED.h>
 
 
@@ -50,12 +56,16 @@ const int SOUND_SERVER_PORT = 5005;
 // -----------------------------------------------------
 // Colour‑hint GPIOs (external LEDs for the player)
 // -----------------------------------------------------
+bool HINT = false;  //Show or not show hints
 #define PIN_HINT_RED 14
 #define PIN_HINT_BLUE 12
 #define PIN_HINT_GREEN 13
 #define PIN_GPIO19_LED 19              // status LED- follows the sacrificial‑LED blink
 static unsigned long lastBlink19 = 0;  // timestamp of the last toggle
 static bool gpio19State = false;       // current level of GPIO19 (HIGH/LOW)
+
+// V7
+#define SPEAKER_PIN 4
 
 
 #define CONFIG_VERSION 31
@@ -160,6 +170,13 @@ void saveHighscores();
 // ============================================================================
 // 2. GLOBAL VARIABLES
 // ============================================================================
+// OTA Update progress
+size_t update_totalSize = 0;
+size_t update_currentSize = 0;
+String update_status = "Ready";
+bool update_inProgress = false;
+
+
 CRGB leds[MAX_LEDS];
 Preferences preferences;
 WebServer *server;
@@ -198,11 +215,11 @@ CRGB col_c1, col_c2, col_c3, col_c4, col_c5, col_c6, col_cw, col_cb;
 Melody melStart, melWin, melLose, melMistake, melShotBlue, melShotRed, melShotGreen, melShotWhite, melHit;
 
 // Config
-int config_num_leds = 475;
-int config_brightness_pct = 50;
+int config_num_leds = 478;
+int config_brightness_pct = 25;
 int config_start_level = 1;
 bool config_sacrifice_led = true;
-int config_homebase_size = 3;
+int config_homebase_size = 1;
 int config_shot_speed_pct = 100;
 int ledStartOffset = 1;
 
@@ -509,7 +526,7 @@ bool debounceButton(bool raw, bool &stable, uint32_t &lastChange, uint32_t now) 
   }
 
   if ((now - lastChange) > DEBOUNCE_MS) {
-    stable = raw;      // input has been stable long enough
+    stable = raw;  // input has been stable long enough
   }
 
   return stable;
@@ -519,113 +536,131 @@ bool debounceButton(bool raw, bool &stable, uint32_t &lastChange, uint32_t now) 
 // =========================================================================
 // 4. AUDIO ENGINE
 // =========================================================================
+
+// V7
 void playToneUDP(String seq) {
- if (WiFi.status() != WL_CONNECTED) return;  // prevent early crash
-  udp.beginPacket(SOUND_SERVER_IP, SOUND_SERVER_PORT);
-  udp.print(seq);              // send the whole string
-  udp.endPacket();
+  return;
 }
 
+// V7
+void playToneLocal(int freq, int duration_ms) {
+  if (!config_sound_on || config_volume_pct == 0) return;
 
+  // Map volume percentage to duty cycle (0-127)
+  int volume = map(config_volume_pct, 0, 100, 0, 127);
 
+  // Play the tone
+  tone(SPEAKER_PIN, freq, duration_ms);
+}
 
-void playSound(SoundEvent evt) {
-  Serial.print("playSound= ");
-  Serial.print(evt);
-  switch (evt) {
-    case 1:  //START
-      Serial.println(" Start");
-//      Serial.print("cfg_snd_start=");
-//      Serial.println(cfg_snd_start);
-      playToneUDP(cfg_snd_start);
-      //      playToneUDP(523, 80);
-      //      playToneUDP(659, 80);
-      //      playToneUDP(784, 80);
-      //      playToneUDP(1047, 300);
-      break;
+// V7
+void playSequenceLocal(String seq) {
+  if (seq.length() == 0) return;
 
-    case 2:  //WIN
-      Serial.println(" Win");
-//      Serial.print("cfg_snd_win=");
-//      Serial.println(cfg_snd_win);
-      playToneUDP(cfg_snd_win);
-      //      playToneUDP(523, 80);
-      //      playToneUDP(659, 80);
-      //      playToneUDP(784, 80);
-      //      playToneUDP(1047, 300);
-      //      playToneUDP(0, 150);
-      //      playToneUDP(1047, 60);
-      //      playToneUDP(1319, 60);
-      break;
+  // Parse and play sequence
+  int start = 0;
+  int end = seq.indexOf(';');
+  while (end != -1) {
+    String pair = seq.substring(start, end);
+    int comma = pair.indexOf(',');
+    if (comma != -1) {
+      int freq = pair.substring(0, comma).toInt();
+      int dur = pair.substring(comma + 1).toInt();
+      if (freq > 0 && dur > 0) {
+        playToneLocal(freq, dur);
+        // Small delay between tones to prevent overlap
+        delay(5);
+      }
+    }
+    start = end + 1;
+    end = seq.indexOf(';', start);
+  }
 
-    case 3:  //LOSE
-      Serial.println(" Lose");
-//      Serial.print("cfg_snd_lose=");
-//      Serial.println(cfg_snd_lose);
-      playToneUDP(cfg_snd_lose);
-      //      playToneUDP(370, 100);
-      //      playToneUDP(349, 100);
-      //      playToneUDP(330, 100);
-      //      playToneUDP(311, 400);
-      break;
-
-    case 4:  //MISTAKE
-      Serial.println(" Mistake");
-//      Serial.print("cfg_snd_mistake=");
-//      Serial.println(cfg_snd_mistake);
-      playToneUDP(cfg_snd_mistake);
-      //      playToneUDP(60, 250);
-      break;
-
-    case 5:  //HIT
-      Serial.println(" Hit");
-//      Serial.print("cfg_snd_hit=");
-//      Serial.println(cfg_snd_hit);
-      playToneUDP(cfg_snd_hit);
-      //      playToneUDP(2093, 60);
-      break;
-
-    default:
-      Serial.println(" Unknown");
-      playToneUDP("100, 750");
+  // Last pair
+  String pair = seq.substring(start);
+  int comma = pair.indexOf(',');
+  if (comma != -1) {
+    int freq = pair.substring(0, comma).toInt();
+    int dur = pair.substring(comma + 1).toInt();
+    if (freq > 0 && dur > 0) {
+      playToneLocal(freq, dur);
+    }
   }
 }
 
+
+//V8?
+// Non-blocking UDP event trigger (fire and forget)
+void triggerExternalEvent(String eventType, String data = "") {
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  // Send event asynchronously - don't wait for response
+  String message = eventType + ":" + data;
+
+  // Use a quick non-blocking send
+  udp.beginPacket(EVENT_SERVER_IP, EVENT_SERVER_PORT);
+  udp.print(message);
+  udp.endPacket();
+
+  Serial.print("Event sent: ");
+  Serial.println(message);
+}
+
+
+
+// V7
+void playSound(SoundEvent evt) {
+  Serial.print("playSound= ");
+  Serial.print(evt);
+
+  switch (evt) {
+    case EVT_START:
+      Serial.println(" Start");
+      playSequenceLocal(cfg_snd_start);
+      break;
+    case EVT_WIN:
+      Serial.println(" Win");
+      playSequenceLocal(cfg_snd_win);
+      break;
+    case EVT_LOSE:
+      Serial.println(" Lose");
+      playSequenceLocal(cfg_snd_lose);
+      break;
+    case EVT_MISTAKE:
+      Serial.println(" Mistake");
+      playSequenceLocal(cfg_snd_mistake);
+      break;
+    case EVT_HIT_SUCCESS:
+      Serial.println(" Hit");
+      playSequenceLocal(cfg_snd_hit);
+      break;
+    default:
+      Serial.println(" Unknown");
+      playSequenceLocal("100,750");
+  }
+}
+
+// V7
 void playShotSound(int color) {
   Serial.print("playShotSound= ");
   Serial.print(color);
-  //playToneUDP(800, 250);
 
   switch (color) {
-    case 1:  //Blue button
+    case 1:  // Blue button
       Serial.println(" Blue btn");
-//      Serial.print("cfg_snd_shot_b=");
-//      Serial.println(cfg_snd_shot_b);
-      playToneUDP(cfg_snd_shot_b);
-      //      playToneUDP(698, 50);
-      //      playToneUDP(659, 50);
+      playSequenceLocal(cfg_snd_shot_b);
       break;
-    case 2:  //Red button
+    case 2:  // Red button
       Serial.println(" Red btn");
-//      Serial.print("cfg_snd_shot_r=");
-//      Serial.println(cfg_snd_shot_r);
-      playToneUDP(cfg_snd_shot_r);
-      //      playToneUDP(784, 30);
-      //      playToneUDP(1047, 30);
-      //      playToneUDP(1319, 30);
+      playSequenceLocal(cfg_snd_shot_r);
       break;
-    case 3:  //Green button
+    case 3:  // Green button
       Serial.println(" Green btn");
-//      Serial.print("cfg_snd_shot_g=");
-//      Serial.println(cfg_snd_shot_g);
-      playToneUDP(cfg_snd_shot_g);
-      //      playToneUDP(523, 30);
-      //      playToneUDP(554, 30);
-      //      playToneUDP(523, 30);
+      playSequenceLocal(cfg_snd_shot_g);
       break;
     default:
       Serial.println(" Unknown btn");
-      playToneUDP("100, 750");
+      playSequenceLocal("100,750");
   }
 }
 
@@ -1365,47 +1400,29 @@ void handleContinue() {
 }
 
 
+
 String getUpdateHTML() {
-  // Returns the full HTML page used for OTA firmware updates (file upload form).
   String h = "<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>";
   h += "<title>Firmware Update</title>";
-  h += "<style>body{font-family:sans-serif;background:#111;color:#eee;padding:20px;max-width:600px;margin:auto;} h2{color:#0f0;} input{width:100%;margin-bottom:10px;padding:10px;}</style>";
-  h += "</head><body><h2>SYSTEM UPDATE</h2>";
-  h += "<p>Upload .bin file from Arduino IDE (Sketch -> Export Compiled Binary).</p>";
-  h += "<form method='POST' action='/update' enctype='multipart/form-data'><input type='file' name='update'><br><button type='submit' style='padding:15px;background:#00f;color:white;font-weight:bold;width:100%;cursor:pointer;'>UPDATE FIRMWARE</button></form>";
-  h += "<br><a href='/' style='color:#0f0;'>Back</a></body></html>";
-  return h;
-}
-
-
-String getColorHTML() {
-  // Returns the HTML page that lets the user pick custom colours for enemies, bosses, and player shots.
-  String h = "<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>";
-  h += "<title>Color Config</title>";
-  h += "<style>body{font-family:sans-serif;background:#111;color:#eee;padding:10px;max-width:800px;margin:auto;}input,button{width:100%;background:#333;color:#fff;border:1px solid #555;padding:8px;border-radius:4px;box-sizing:border-box;margin-bottom:5px;} .sec{margin-top:15px;border-top:1px solid #555;padding-top:15px;background:#222;padding:15px;border-radius:5px;} h3{margin-top:0;color:#0f0;} input[type=color] { height: 50px; cursor: pointer; } a { color: #00ff00; text-decoration: none; }</style>";
+  h += "<style>";
+  h += "body { font-family: sans-serif; background: #111; color: #eee; padding: 20px; max-width: 600px; margin: auto; }";
+  h += "h2 { color: #0f0; }";
+  h += "</style>";
   h += "</head><body>";
-  h += "<h2>🎨 CUSTOM COLORS</h2>";
-  h += "<form action='/savecolors' method='POST'>";
+  h += "<h2>SYSTEM UPDATE</h2>";
+  h += "<p>Upload a new .bin file from the Arduino IDE (Sketch -> Export Compiled Binary).</p>";
 
-  h += "<div class='sec'><h3>Main Enemies (Types 1-3)</h3>";
-  h += "Type 1 (Blue btn): <input type='color' name='c1' value='" + hex_c1 + "'>";
-  h += "Type 2 (Red btn): <input type='color' name='c2' value='" + hex_c2 + "'>";
-  h += "Type 3 (Green btn): <input type='color' name='c3' value='" + hex_c3 + "'></div>";
+  h += "<form method='POST' action='/update' enctype='multipart/form-data'>";
+  h += "<input type='file' name='update'><br><br>";
+  h += "<button type='submit' style='padding:15px;background:#00f;color:white;font-weight:bold;width:100%;cursor:pointer;'>UPDATE FIRMWARE</button>";
+  h += "</form>";
 
-  h += "<div class='sec'><h3>Boss / Mix Colors</h3>";
-  h += "Mix Color 1: <input type='color' name='c4' value='" + hex_c4 + "'>";
-  h += "Mix Color 2: <input type='color' name='c5' value='" + hex_c5 + "'>";
-  h += "Mix Color 3: <input type='color' name='c6' value='" + hex_c6 + "'>";
-  h += "Boss Generic/Dark: <input type='color' name='cb' value='" + hex_cb + "'></div>";
-
-  h += "<div class='sec'><h3>Player Shots</h3>";
-  h += "Combo Shot (White): <input type='color' name='cw' value='" + hex_cw + "'></div>";
-
-  h += "<br><button type='submit' style='background:#009900;font-size:1.2em;'>SAVE COLORS</button>";
-  h += "</form><br><a href='/'>&laquo; Back to Main Menu</a>";
+  h += "<br><a href='/' style='color:#0f0;'>Back to Main Menu</a>";
   h += "</body></html>";
+
   return h;
 }
+
 
 
 /* ------------------------ getSoundHTML -------------------------
@@ -1541,6 +1558,34 @@ String getHTML() {
   return h;
 }
 
+String getColorHTML() {
+  String h = "<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>";
+  h += "<title>Color Config</title>";
+  h += "<style>body{font-family:sans-serif;background:#111;color:#eee;padding:10px;max-width:800px;margin:auto;}input,button{width:100%;background:#333;color:#fff;border:1px solid #555;padding:8px;border-radius:4px;box-sizing:border-box;margin-bottom:5px;} .sec{margin-top:15px;border-top:1px solid #555;padding-top:15px;background:#222;padding:15px;border-radius:5px;} h3{margin-top:0;color:#0f0;} input[type=color] { height: 50px; cursor: pointer; } a { color: #00ff00; text-decoration: none; }</style>";
+  h += "</head><body>";
+  h += "<h2>🎨 CUSTOM COLORS</h2>";
+  h += "<form action='/savecolors' method='POST'>";
+
+  h += "<div class='sec'><h3>Main Enemies (Types 1-3)</h3>";
+  h += "Type 1 (Blue btn): <input type='color' name='c1' value='" + hex_c1 + "'>";
+  h += "Type 2 (Red btn): <input type='color' name='c2' value='" + hex_c2 + "'>";
+  h += "Type 3 (Green btn): <input type='color' name='c3' value='" + hex_c3 + "'></div>";
+
+  h += "<div class='sec'><h3>Boss / Mix Colors</h3>";
+  h += "Mix Color 1: <input type='color' name='c4' value='" + hex_c4 + "'>";
+  h += "Mix Color 2: <input type='color' name='c5' value='" + hex_c5 + "'>";
+  h += "Mix Color 3: <input type='color' name='c6' value='" + hex_c6 + "'>";
+  h += "Boss Generic/Dark: <input type='color' name='cb' value='" + hex_cb + "'></div>";
+
+  h += "<div class='sec'><h3>Player Shots</h3>";
+  h += "Combo Shot (White): <input type='color' name='cw' value='" + hex_cw + "'></div>";
+
+  h += "<br><button type='submit' style='background:#009900;font-size:1.2em;'>SAVE COLORS</button>";
+  h += "</form><br><a href='/'>&laquo; Back to Main Menu</a>";
+  h += "</body></html>";
+  return h;
+}
+
 
 /* ---------------------------- enableWiFi ----------------------------------------
    Starts the ESP32 in AP+STA mode, connects to the configured Wi Fi network (if any),
@@ -1564,6 +1609,37 @@ void enableWiFi() {
 }
 
 
+void handleSaveSounds() {
+  cfg_snd_start = server->arg("s_start");
+  cfg_snd_win = server->arg("s_win");
+  cfg_snd_lose = server->arg("s_lose");
+  cfg_snd_mistake = server->arg("s_mistake");
+  cfg_snd_hit = server->arg("s_hit");
+  cfg_snd_shot_b = server->arg("s_shot_b");
+  cfg_snd_shot_r = server->arg("s_shot_r");
+  cfg_snd_shot_g = server->arg("s_shot_g");
+  cfg_snd_shot_w = server->arg("s_shot_w");
+
+  preferences.begin("snds", false);
+  preferences.putString("s_start", cfg_snd_start);
+  preferences.putString("s_win", cfg_snd_win);
+  preferences.putString("s_lose", cfg_snd_lose);
+  preferences.putString("s_mistake", cfg_snd_mistake);
+  preferences.putString("s_hit", cfg_snd_hit);
+  preferences.putString("s_shot_b", cfg_snd_shot_b);
+  preferences.putString("s_shot_r", cfg_snd_shot_r);
+  preferences.putString("s_shot_g", cfg_snd_shot_g);
+  preferences.putString("s_shot_w", cfg_snd_shot_w);
+  preferences.end();
+
+  loadSounds();
+  server->sendHeader("Location", "/sounds");
+  server->send(303);
+}
+
+
+
+
 // ==========================================================================
 // 8. SETUP
 // ==========================================================================
@@ -1571,9 +1647,13 @@ void setup() {
   // -----------------------------
   // 1. SERIAL + BASIC GPIO
   // -----------------------------
+  currentState = STATE_MENU;  // Add this line to ensure we start in menu state
+
   Serial.begin(115200);
   Serial.println();
-  Serial.println("SETUP: start");
+  Serial.println("=== SPACE INVADERS V8 ===");
+  Serial.printf("Free sketch space: %u bytes\n", ESP.getFreeSketchSpace());
+
 
   pinMode(PIN_BTN_BLUE, INPUT_PULLUP);
   pinMode(PIN_BTN_RED, INPUT_PULLUP);
@@ -1587,12 +1667,22 @@ void setup() {
   pinMode(PIN_HINT_RED, OUTPUT);
   pinMode(PIN_HINT_BLUE, OUTPUT);
   pinMode(PIN_HINT_GREEN, OUTPUT);
-  digitalWrite(PIN_HINT_RED, LOW);
-  digitalWrite(PIN_HINT_BLUE, LOW);
-  digitalWrite(PIN_HINT_GREEN, LOW);
-
+  if (HINT) {
+    digitalWrite(PIN_HINT_RED, LOW);
+    digitalWrite(PIN_HINT_BLUE, LOW);
+    digitalWrite(PIN_HINT_GREEN, LOW);
+  } else {
+    digitalWrite(PIN_HINT_RED, HIGH);
+    digitalWrite(PIN_HINT_BLUE, HIGH);
+    digitalWrite(PIN_HINT_GREEN, HIGH);
+  }
   pinMode(PIN_GPIO19_LED, OUTPUT);
   digitalWrite(PIN_GPIO19_LED, LOW);
+
+  // Initialize speaker pin (V7)
+  pinMode(SPEAKER_PIN, OUTPUT);
+  digitalWrite(SPEAKER_PIN, LOW);
+
 
   // -----------------------------
   // 2. CONFIG + PREFERENCES
@@ -1614,6 +1704,10 @@ void setup() {
   String wifiPass = preferences.getString("pass", "");
   wifiSsid.trim();
   wifiPass.trim();
+  Serial.print("SSID= ");
+  Serial.println(wifiSsid);
+  Serial.print("PASS= ");
+  Serial.println(wifiPass);
 
   preferences.end();
 
@@ -1707,7 +1801,7 @@ void setup() {
   Serial.println("SETUP: Creating WebServer");
   server = new WebServer(80);
 
-  // ROUTES
+  // WEB ROUTES
   server->on("/", []() {
     server->send(200, "text/html", getHTML());
   });
@@ -1717,6 +1811,7 @@ void setup() {
   server->on("/sounds", []() {
     server->send(200, "text/html", getSoundHTML());
   });
+  server->on("/savesounds", handleSaveSounds);
   server->on("/colors", []() {
     server->send(200, "text/html", getColorHTML());
   });
@@ -1724,26 +1819,109 @@ void setup() {
   server->on("/update", HTTP_GET, []() {
     server->send(200, "text/html", getUpdateHTML());
   });
+
+
   server->on(
     "/update", HTTP_POST,
     []() {
+      server->sendHeader("Connection", "close");
       server->send(200, "text/plain",
                    (Update.hasError()) ? "UPDATE FAILED" : "UPDATE SUCCESS! RESTARTING...");
+      delay(1000);
       ESP.restart();
     },
     []() {
       HTTPUpload &upload = server->upload();
+
       if (upload.status == UPLOAD_FILE_START) {
-        if (!Update.begin(UPDATE_SIZE_UNKNOWN)) Update.printError(Serial);
-      } else if (upload.status == UPLOAD_FILE_WRITE) {
-        if (Update.write(upload.buf, upload.currentSize) != upload.currentSize)
+        Serial.printf("Update: %s\n", upload.filename.c_str());
+        if (!upload.filename.endsWith(".bin")) {
+          return;
+        }
+        Serial.println("Update starting...");
+
+        uint32_t maxSketchSpace = (ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000;
+        if (!Update.begin(maxSketchSpace, U_FLASH)) {
           Update.printError(Serial);
+        }
+      } else if (upload.status == UPLOAD_FILE_WRITE) {
+        if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+          Update.printError(Serial);
+        }
       } else if (upload.status == UPLOAD_FILE_END) {
-        if (Update.end(true)) Serial.printf("Update Success: %u\n", upload.totalSize);
-        else Update.printError(Serial);
+        if (Update.end(true)) {
+          Serial.printf("Update Success: %u bytes\n", upload.totalSize);
+        } else {
+          Update.printError(Serial);
+        }
       }
+
+      yield();
     });
+
+
+
+
+
+
+  server->on("/progress", HTTP_GET, []() {
+    int progress = 0;
+
+    // Simple progress calculation
+    if (update_inProgress) {
+      const size_t TYPICAL_FILE_SIZE = 924240;
+      if (update_currentSize > 0) {
+        progress = (update_currentSize * 100) / TYPICAL_FILE_SIZE;
+        if (progress > 100) progress = 100;
+      }
+    } else if (update_status == "Success! Restarting...") {
+      progress = 100;
+    }
+
+    String jsonResponse = "{\"progress\":" + String(progress) + ",\"status\":\"" + update_status + "\"}";
+    server->send(200, "application/json", jsonResponse);
+  });
+
+
+
   server->on("/next", HTTP_POST, handleContinue);
+
+  server->on("/status", HTTP_GET, []() {
+    String h = "<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>";
+    h += "<title>Update Status</title>";
+    h += "<style>";
+    h += "body { font-family: sans-serif; background: #111; color: #eee; padding: 20px; max-width: 600px; margin: auto; }";
+    h += "h2 { color: #0f0; }";
+    h += ".spinner { display: inline-block; width: 20px; height: 20px; border: 3px solid rgba(255,255,255,.3); border-radius: 50%; border-top-color: #fff; animation: spin 1s ease-in-out infinite; margin-right: 10px; }";
+    h += "@keyframes spin { to { transform: rotate(360deg); } }";
+    h += "</style>";
+    h += "<script>";
+    h += "function updateStatus() {";
+    h += "  fetch('/progress')";
+    h += "    .then(response => response.json())";
+    h += "    .then(data => {";
+    h += "      document.getElementById('status').innerHTML = '<div class=\"spinner\"></div> ' + data.status;";
+    h += "      if (data.progress >= 100 || data.status.includes('Success') || data.status.includes('Error')) {";
+    h += "        clearInterval(intervalId);";
+    h += "        if (data.status.includes('Success')) {";
+    h += "          document.getElementById('status').innerHTML = '✅ Update complete! Device is restarting...';";
+    h += "        }";
+    h += "      }";
+    h += "    });";
+    h += "}";
+    h += "var intervalId = setInterval(updateStatus, 1000);";
+    h += "updateStatus();";  // Run immediately
+    h += "</script>";
+    h += "</head><body>";
+    h += "<h2>UPDATE IN PROGRESS</h2>";
+    h += "<div id='status'><div class='spinner'></div> Starting update...</div>";
+    h += "<br><a href='/' style='color:#0f0;'>Back to Main Menu</a>";
+    h += "</body></html>";
+
+    server->send(200, "text/html", h);
+  });
+
+
 
   // -----------------------------
   // 7. START WEB SERVER
@@ -1921,9 +2099,11 @@ void loop() {
     bool buttonPressedThisFrame = isAnyBtnPressed;  // remember for later
     if (buttonPressedThisFrame) {
       // force all hint pins LOW right now
-      digitalWrite(PIN_HINT_RED, LOW);
-      digitalWrite(PIN_HINT_BLUE, LOW);
-      digitalWrite(PIN_HINT_GREEN, LOW);
+      if (!HINT) {
+        digitalWrite(PIN_HINT_RED, LOW);
+        digitalWrite(PIN_HINT_BLUE, LOW);
+        digitalWrite(PIN_HINT_GREEN, LOW);
+      }
       // also clear the pending‑hint flag so the later logic cannot re‑turn it on
       hintPending = false;
     }
@@ -1943,19 +2123,19 @@ void loop() {
         int c = 0;
 
 
-//        b = (digitalRead(PIN_BTN_BLUE) == LOW);
-//        r = (digitalRead(PIN_BTN_RED) == LOW);
-//        g = (digitalRead(PIN_BTN_GREEN) == LOW);
+        //        b = (digitalRead(PIN_BTN_BLUE) == LOW);
+        //        r = (digitalRead(PIN_BTN_RED) == LOW);
+        //        g = (digitalRead(PIN_BTN_GREEN) == LOW);
 
-uint32_t now = millis();
+        uint32_t now = millis();
 
-btnRawB = (digitalRead(PIN_BTN_BLUE) == LOW);
-btnRawR = (digitalRead(PIN_BTN_RED) == LOW);
-btnRawG = (digitalRead(PIN_BTN_GREEN) == LOW);
+        btnRawB = (digitalRead(PIN_BTN_BLUE) == LOW);
+        btnRawR = (digitalRead(PIN_BTN_RED) == LOW);
+        btnRawG = (digitalRead(PIN_BTN_GREEN) == LOW);
 
-bool b = debounceButton(btnRawB, btnStableB, lastChangeB, now);
-bool r = debounceButton(btnRawR, btnStableR, lastChangeR, now);
-bool g = debounceButton(btnRawG, btnStableG, lastChangeG, now);
+        bool b = debounceButton(btnRawB, btnStableB, lastChangeB, now);
+        bool r = debounceButton(btnRawR, btnStableR, lastChangeR, now);
+        bool g = debounceButton(btnRawG, btnStableG, lastChangeG, now);
 
         if (r && g && b) c = 7;
         else if (r && g) c = 4;
@@ -2000,7 +2180,8 @@ bool g = debounceButton(btnRawG, btnStableG, lastChangeG, now);
       shots[i].position += moveStep;
       bool remove = false;
 
-      /* ===  HIT DETECTION  === */
+
+      // ===  HIT DETECTION  === //
       if (currentState == STATE_PLAYING) {  // normal wave
         if (shots[i].position >= enemyFrontIndex && !enemies.empty()) {
           if (shots[i].color == enemies[0].color) {  // **correct hit**
@@ -2012,10 +2193,17 @@ bool g = debounceButton(btnRawG, btnStableG, lastChangeG, now);
             checkWinCondition();
             hitJustOccurred = true;  // tell hint logic
             playSound(EVT_HIT_SUCCESS);
-          } else {  // wrong colour → penalty
-            enemies.insert(enemies.begin(),
-                           { shots[i].color, 0.0 });
+            /*
+          } else {  // wrong colour → penalty.  Add players color to the START of the enemy array
+            enemies.insert(enemies.begin(), { shots[i].color, 0.0 });
             enemyFrontIndex -= 1.0;
+            remove = true;
+            playSound(EVT_MISTAKE);
+          }
+          */
+          } else {  // wrong colour → penalty. Add the player's color to the END of the enemy array
+            enemies.push_back({ shots[i].color, 0.0 });
+            // enemyFrontIndex remains the same since we're adding to the back
             remove = true;
             playSound(EVT_MISTAKE);
           }
@@ -2295,15 +2483,18 @@ bool g = debounceButton(btnRawG, btnStableG, lastChangeG, now);
       showHint = false;
     }
 
-    if (showHint) {
-      digitalWrite(PIN_HINT_RED, (leadColourNow == 2) ? HIGH : LOW);
-      digitalWrite(PIN_HINT_BLUE, (leadColourNow == 1) ? HIGH : LOW);
-      digitalWrite(PIN_HINT_GREEN, (leadColourNow == 3) ? HIGH : LOW);
-    } else {
-      digitalWrite(PIN_HINT_RED, LOW);
-      digitalWrite(PIN_HINT_BLUE, LOW);
-      digitalWrite(PIN_HINT_GREEN, LOW);
+    if (HINT) {
+      if (showHint) {
+        digitalWrite(PIN_HINT_RED, (leadColourNow == 2) ? HIGH : LOW);
+        digitalWrite(PIN_HINT_BLUE, (leadColourNow == 1) ? HIGH : LOW);
+        digitalWrite(PIN_HINT_GREEN, (leadColourNow == 3) ? HIGH : LOW);
+      } else {
+        digitalWrite(PIN_HINT_RED, HIGH);
+        digitalWrite(PIN_HINT_BLUE, HIGH);
+        digitalWrite(PIN_HINT_GREEN, HIGH);
+      }
     }
+
 
     // remember for the next frame
     hintPending = showHint;
