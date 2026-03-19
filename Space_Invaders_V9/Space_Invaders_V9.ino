@@ -1,36 +1,52 @@
 // ==========================================================================
 // PROJECT: Space Invders - silent version
-// HARDWARE: ESP32-WROOM Devkit v1
-// CORE VERSION: 2.0.17 (Required?)
+// HARDWARE: ESP32D (ESP32 Dev Modile)
+// CORE VERSION: 2.0.17 (Required??)
 // This version strips the sound and 12s code.
 // V2 adds a "continue" button to go to the next level.
-// V3 adds "hint" LEDS
+// V3 adds "hint" LEDS, renamed White Button to Reset Button
+// V4 Adds UDP commands to play sounds
+// V5 Restores web page to set WiFi Credentials
+// V6 Adds debounce to the RGB buttons.
+// V7 Replace UDP Sound Functions with tone()
+//    Add missed sprites to the END of the enemy array.
+// V8 Fixed upload problem, added hint option.
+// V9 Removed game statistics
 // ==========================================================================
+//#define VERSION 9.17  // Working Version, except the hint LEDs.
+#define VERSION 9.18  // Added "Halloween", hint LEDs on all the time.
+                      // hintLEDsOFF()
 
+bool config_hint_always_on = true;  // Set to true to keep hints always ON
 
 #include <WiFi.h>
 #include <WebServer.h>
 #include <Preferences.h>
-#include <driver/i2s.h>
 #include <vector>
-#include <Update.h>  // Fuer Web-OTA
+#include <Update.h>          // Fuer Web-OTA
+#include "esp32-hal-ledc.h"  // For tone function
+
+
+
+// UDP
+#include <WiFiUdp.h>
+WiFiUDP udp;  // Create a UDP object
+//const char *SOUND_SERVER_IP = "192.168.1.150";
+//const char *SOUND_SERVER_IP = "sandbox.local";
+//const int SOUND_SERVER_PORT = 5005;
+const char *EVENT_SERVER_IP = "192.168.1.150";  // Your NUC IP
+const int EVENT_SERVER_PORT = 5006;             // Different port for events
 
 
 // --- LED CONFIGURATION ---
-///#define FASTLED_ESP32_S3_PIN 7
-///#define FASTLED_RMT_MAX_CHANNELS 1
 #include <FastLED.h>
 
 
 
 
-// --------------------------------------------------------------------------
+// ============================================================================
 // 1. DEFINITIONS & DATA TYPES
-// --------------------------------------------------------------------------
-#define I2S_BCLK 4
-#define I2S_LRC 5
-#define I2S_DOUT 6
-
+// ============================================================================
 #define PIN_LED_DATA 15
 #define MAX_LEDS 480
 #define LED_TYPE WS2812B
@@ -39,8 +55,23 @@
 #define PIN_BTN_BLUE 25
 #define PIN_BTN_RED 33
 #define PIN_BTN_GREEN 26
-#define PIN_BTN_WHITE 32
-#define PIN_BTN_CONTINUE 27  // <<< NEW Continue button- used to go to the next level
+#define PIN_BTN_WHITE 32     // Reset, start over
+#define PIN_BTN_CONTINUE 27  // Go to the next level
+
+// -----------------------------------------------------
+// Colour‑hint GPIOs (external LEDs for the player)
+// -----------------------------------------------------
+#define PIN_HINT_RED 14
+#define PIN_HINT_BLUE 12
+#define PIN_HINT_GREEN 13
+
+
+// status LED- follows the sacrificial‑LED blink
+#define PIN_GPIO19_LED 19
+static unsigned long lastBlink19 = 0;  // timestamp of the last toggle
+static bool gpio19State = false;       // current level of GPIO19 (HIGH/LOW)
+
+#define SPEAKER_PIN 4
 
 #define CONFIG_VERSION 31
 #define FRAME_DELAY 16  // 16ms = approx. 60 FPS
@@ -137,23 +168,23 @@ CRGB getColor(int colorCode);
 void drawCrispPixel(float pos, CRGB color);
 void flashPixel(int pos);
 
-void saveHighscores();
 
 
 
-// --------------------------------------------------------------------------
+// ============================================================================
 // 2. GLOBAL VARIABLES
-// --------------------------------------------------------------------------
+// ============================================================================
+// OTA Update progress
+size_t update_totalSize = 0;
+size_t update_currentSize = 0;
+String update_status = "Ready";
+bool update_inProgress = false;
+
+
 CRGB leds[MAX_LEDS];
 Preferences preferences;
-WebServer server(80);
-///QueueHandle_t audioQueue;
-///TaskHandle_t audioTaskHandle;
+WebServer *server;
 
-// Statistics
-unsigned long stat_totalShots = 0;
-unsigned long stat_totalKills = 0;
-int stat_lastGameShots = 0;
 
 // Default Sound Strings
 const String DEF_SND_START = "523,80;659,80;784,80;1047,300";
@@ -184,11 +215,11 @@ CRGB col_c1, col_c2, col_c3, col_c4, col_c5, col_c6, col_cw, col_cb;
 Melody melStart, melWin, melLose, melMistake, melShotBlue, melShotRed, melShotGreen, melShotWhite, melHit;
 
 // Config
-int config_num_leds = 100;
-int config_brightness_pct = 50;
+int config_num_leds = 478;
+int config_brightness_pct = 25;
 int config_start_level = 1;
 bool config_sacrifice_led = true;
-int config_homebase_size = 3;
+int config_homebase_size = 1;
 int config_shot_speed_pct = 100;
 int ledStartOffset = 1;
 
@@ -247,26 +278,47 @@ int boss3PhaseIndex = 0;
 int boss3BurstCounter = 0;
 int boss3Markers[2];
 
-int currentScore = 0;
-int highScore = 0;
-int lastGames[3] = { 0, 0, 0 };
-unsigned long levelStartTime = 0;
-int levelMaxPossibleScore = 0;
-int levelAchievedScore = 0;
+
+// V9 int currentScore = 0;
+int levelMaxPossibleScore = 0;  // Used in the final score LED display
+int levelAchievedScore = 0;     // Used in the final score LED display
 
 
+// -----– colour‑hint state ------------------------------------------------
+int lastLeadColour = -1;       // colour of the front entity on the previous frame
+bool hintPending = false;      // true = we should light the appropriate hint LED
+bool hitJustOccurred = false;  // set to true only when a correct shot destroyed the front enemy
+// bool HINT = false;             // Show or not show hints. If false, LEDs always on.
 
-// --------------------------------------------------------------------------
+
+//--------------- Button Debounce ------------------------
+const uint16_t DEBOUNCE_MS = 30;
+bool btnRawB, btnRawR, btnRawG;
+bool btnStableB = false, btnStableR = false, btnStableG = false;
+uint32_t lastChangeB = 0, lastChangeR = 0, lastChangeG = 0;
+
+
+// ============================================================================
 // 3. HELPER FUNCTIONS
-// --------------------------------------------------------------------------
+// ============================================================================
+
+/* -------------------- hexToCRGB --------------------------
+   Converts a HTML style “#RRGGBB” colour string into a FastLED
+   CRGB value (red, green, blue components).
+--------------------------------------------------------------- */
 CRGB hexToCRGB(String hex) {
+  //Converts a HTML style “#RRGGBB” colour string into a FastLED CRGB value (red, green, blue components).
   long number = strtol(&hex[1], NULL, 16);
   return CRGB((number >> 16) & 0xFF, (number >> 8) & 0xFF, number & 0xFF);
 }
 
 bool levelJustFinished = false;  // <<< NEW – tells us we just won a level
 
-// -------------------- Melody --------------------
+
+/* -------------------- Melody ------------------------------------
+   Parses a semi colon separated list of “freq,duration” pairs 
+   into a std::vector<ToneCmd> (the internal melody representation).
+   ----------------------------------------------------------------*/
 Melody parseSoundString(String data) {
   Melody m;
   if (data.length() == 0) return m;
@@ -295,21 +347,24 @@ Melody parseSoundString(String data) {
   return m;
 }
 
-//-------------------- melody_FromStr --------------------
+/* -------------------- melody_FromStr --------------------
+   Convenience wrapper that replaces m with the result of
+   parseSoundString(s).
+   ----------------------------------------------------------- */
 void melodyFromStr(Melody &m, String s) {
   m = parseSoundString(s);
 }
 
-// ---------------------------------------------------------------------------
-//  abortAndResetGame() – complete wipe (keeps Wi‑Fi, OTA, colours, etc.)
-// ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
-// abortAndResetGame() – full wipe for a *new* player
-// ---------------------------------------------------------------------------
+
+
+/* ----------------  abortAndResetGame()-------------------
+   1️⃣  Erase all containers that belong to the current run
+   Full wipe for a *new* player. Completely wipes all runtime
+   containers (enemies, shots, bosses), resets all per run 
+   statistics and state flags, and starts the intro for the
+   configured start level.
+   -------------------------------------------------------- */
 void abortAndResetGame() {
-  // -------------------------------------------------
-  // 1️⃣  Erase all containers that belong to the current run
-  // -------------------------------------------------
   enemies.clear();
   shots.clear();
   bossSegments.clear();
@@ -318,11 +373,12 @@ void abortAndResetGame() {
   // -------------------------------------------------
   // 2️⃣  Reset run‑time statistics and flags
   // -------------------------------------------------
-  stat_lastGameShots = 0;
+  /* V9
   currentScore = 0;
-  levelStartTime = 0;
   levelMaxPossibleScore = 0;
-  levelAchievedScore = 0;
+  */
+  levelAchievedScore = 0;  // Saved for the final score LED display
+
 
   // UI / game‑play flags
   levelJustFinished = false;  // **critical – clears the “continue” flag**
@@ -337,6 +393,13 @@ void abortAndResetGame() {
   lastFireTime = 0;
   bossActionTimer = 0;
   comboTimer = 0;
+
+  // -------------------------------------------------
+  // Reset the hint LEDs.
+  // -------------------------------------------------
+  hintLEDsOFF();
+
+
 
   // -------------------------------------------------
   // 3️⃣  Reset the *campaign* variables
@@ -362,17 +425,15 @@ void abortAndResetGame() {
   // -------------------------------------------------
   currentState = STATE_INTRO;
   startLevelIntro(currentLevel);  // now the intro uses the correct level
-
-  // -------------------------------------------------
-  // 5️⃣  Persist high‑score / last‑games (keep total shots/kills)
-  // -------------------------------------------------
-  saveHighscores();
 }
 
 
-// ---------------------------------------------------------------------------
-//  continueToNextLevel() – move to the next, harder level (keep score)
-// ---------------------------------------------------------------------------
+/* ---------------- continueToNextLevel()-----------------------
+   Mmove to the next, harder level (keep score)
+   Increments the level index, clears level specific containers, 
+   re initialises the appropriate boss or enemy wave, starts the
+   level intro animation and clears the just finished flag.
+   ------------------------------------------------------------ */
 void continueToNextLevel() {
   // 1️⃣  Advance the level index
   currentLevel++;
@@ -431,13 +492,19 @@ void continueToNextLevel() {
   // 6️⃣  Kick off the level‑intro animation (so the player sees the new bar)
   startLevelIntro(currentLevel);
 
+  // hintLEDsOFF();  // Reset the hint LEDs. This is normal
+  hintLEDsON();  // Reset the hint LEDs. This is temporary for Halloween
+
+
   // 7️⃣  We are no longer “just‑finished”; clear the flag.
   levelJustFinished = false;
 }
 
-// ---------------------------------------------------------------------------
-//  Optional tiny menu visual (only used if you enable STATE_MENU)
-// ---------------------------------------------------------------------------
+/* ---------------- drawMenu()-----------------------------------
+   Optional tiny menu visual (only used if you enable STATE_MENU)
+   Simple visual “menu” animation that scrolls blue dots across the
+   strip while keeping the home base LEDs white.
+   ---------------------------------------------------------------- */
 void drawMenu() {
   FastLED.clear();
   for (int i = 0; i < config_num_leds; ++i) {
@@ -449,144 +516,181 @@ void drawMenu() {
 }
 
 
-// --------------------------------------------------------------------------
+/* ---------------- hintLEDsOFF() --------------------
+   Turn the hint LEDs OFF
+   ------------------------------------------------------- */
+void hintLEDsOFF() {
+  // For Halloween
+  digitalWrite(PIN_HINT_RED, HIGH);
+  digitalWrite(PIN_HINT_BLUE, HIGH);
+  digitalWrite(PIN_HINT_GREEN, HIGH);
+}
+
+
+/* ---------------- hintLEDsON() --------------------
+   Turn the hint LEDs ON
+   ------------------------------------------------------- */
+void hintLEDsON() {
+  digitalWrite(PIN_HINT_RED, HIGH);
+  digitalWrite(PIN_HINT_BLUE, HIGH);
+  digitalWrite(PIN_HINT_GREEN, HIGH);
+}
+
+
+//--------------- Handle button debounce ----------------------
+bool debounceButton(bool raw, bool &stable, uint32_t &lastChange, uint32_t now) {
+  if (raw != stable) {
+    lastChange = now;  // input changed — start debounce timer
+  }
+
+  if ((now - lastChange) > DEBOUNCE_MS) {
+    stable = raw;  // input has been stable long enough
+  }
+
+  return stable;
+}
+
+
+// =========================================================================
 // 4. AUDIO ENGINE
-// --------------------------------------------------------------------------
+// =========================================================================
+
+
+void playToneUDP(String seq) {
+  return;
+}
+
+
+void playToneLocal(int freq, int duration_ms) {
+  if (!config_sound_on || config_volume_pct == 0) return;
+
+  // Map volume percentage to duty cycle (0-127)
+  int volume = map(config_volume_pct, 0, 100, 0, 127);
+
+  // Play the tone
+  tone(SPEAKER_PIN, freq, duration_ms);
+}
+
+
+void playSequenceLocal(String seq) {
+  if (seq.length() == 0) return;
+
+  // Parse and play sequence
+  int start = 0;
+  int end = seq.indexOf(';');
+  while (end != -1) {
+    String pair = seq.substring(start, end);
+    int comma = pair.indexOf(',');
+    if (comma != -1) {
+      int freq = pair.substring(0, comma).toInt();
+      int dur = pair.substring(comma + 1).toInt();
+      if (freq > 0 && dur > 0) {
+        playToneLocal(freq, dur);
+        // Small delay between tones to prevent overlap
+        delay(5);
+      }
+    }
+    start = end + 1;
+    end = seq.indexOf(';', start);
+  }
+
+  // Last pair
+  String pair = seq.substring(start);
+  int comma = pair.indexOf(',');
+  if (comma != -1) {
+    int freq = pair.substring(0, comma).toInt();
+    int dur = pair.substring(comma + 1).toInt();
+    if (freq > 0 && dur > 0) {
+      playToneLocal(freq, dur);
+    }
+  }
+}
+
+
+
+// Non-blocking UDP event trigger (fire and forget)
+void triggerExternalEvent(String eventType, String data = "") {
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  // Send event asynchronously - don't wait for response
+  String message = eventType + ":" + data;
+
+  // Use a quick non-blocking send
+  udp.beginPacket(EVENT_SERVER_IP, EVENT_SERVER_PORT);
+  udp.print(message);
+  udp.endPacket();
+
+  Serial.print("Event sent: ");
+  Serial.println(message);
+}
+
+
+
 void playSound(SoundEvent evt) {
   Serial.print("playSound= ");
-  Serial.println(evt);
-  ///  if (!config_sound_on) return;
-  ///  ///Added test for null argument
-  ///  if (audioQueue == nullptr) {
-  ///    // Optional: debug
-  ///    Serial.println("playSound called but audioQueue is NULL");
-  ///    return;
-  ///  }
-  ///  xQueueSend(audioQueue, &evt, 0);
+  Serial.print(evt);
+
+  switch (evt) {
+    case EVT_START:
+      Serial.println(" Start");
+      playSequenceLocal(cfg_snd_start);
+      break;
+    case EVT_WIN:
+      Serial.println(" Win");
+      playSequenceLocal(cfg_snd_win);
+      break;
+    case EVT_LOSE:
+      Serial.println(" Lose");
+      playSequenceLocal(cfg_snd_lose);
+      break;
+    case EVT_MISTAKE:
+      Serial.println(" Mistake");
+      playSequenceLocal(cfg_snd_mistake);
+      break;
+    case EVT_HIT_SUCCESS:
+      Serial.println(" Hit");
+      playSequenceLocal(cfg_snd_hit);
+      break;
+    default:
+      Serial.println(" Unknown");
+      playSequenceLocal("100,750");
+  }
 }
+
 
 void playShotSound(int color) {
   Serial.print("playShotSound= ");
-  Serial.println(color);
-}
-///  switch (color) {
-///    case 1: playSound(EVT_SHOT_BLUE); break;
-///    case 2: playSound(EVT_SHOT_RED); break;
-///    case 3: playSound(EVT_SHOT_GREEN); break;
-///    case 7: playSound(EVT_SHOT_WHITE); break;
-///    default: playSound(EVT_SHOT_BLUE); break;
-///  }
-///}
+  Serial.print(color);
 
-/// Not used
-/*
-void playToneI2S(int freq, int durationMs) {
-  if (freq <= 0) {
-    size_t bytes_written;
-    int samples = (SAMPLE_RATE * durationMs) / 1000;
-    int16_t *buffer = (int16_t *)malloc(samples * 2);
-    memset(buffer, 0, samples * 2);
-    i2s_write(I2S_NUM_0, buffer, samples * 2, &bytes_written, portMAX_DELAY);
-    free(buffer);
-    return;
-  }
-  size_t bytes_written;
-  int samples = (SAMPLE_RATE * durationMs) / 1000;
-  int16_t *buffer = (int16_t *)malloc(samples * 2);
-  int halfPeriod = SAMPLE_RATE / freq / 2;
-
-  int16_t volume = map(config_volume_pct, 0, 100, 0, 10000);
-
-  for (int i = 0; i < samples; i++) {
-    buffer[i] = ((i / halfPeriod) % 2 == 0) ? volume : -volume;
-  }
-  i2s_write(I2S_NUM_0, buffer, samples * 2, &bytes_written, portMAX_DELAY);
-  free(buffer);
-}
-*/
-
-///Unused function
-///void audioTask(void *parameter) {
-///  return;
-///}
-
-/*
-  i2s_config_t i2s_config = {
-    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
-    .sample_rate = SAMPLE_RATE,
-    .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
-    .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
-    .communication_format = I2S_COMM_FORMAT_STAND_I2S,
-    .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-    .dma_buf_count = 4,
-    .dma_buf_len = 512,
-    .use_apll = false,
-    .tx_desc_auto_clear = true
-  };
-
-  i2s_pin_config_t pin_config = {
-    .bck_io_num = I2S_BCLK,
-    .ws_io_num = I2S_LRC,
-    .data_out_num = I2S_DOUT,
-    .data_in_num = I2S_PIN_NO_CHANGE
-  };
-
-  ///  i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
-  ///  i2s_set_pin(I2S_NUM_0, &pin_config);
-  ///  i2s_zero_dma_buffer(I2S_NUM_0);
-
-  const Melody *currentMelody = nullptr;
-  int noteIndex = 0;
-
-  while (true) {
-    SoundEvent newEvent;
-    if (xQueueReceive(audioQueue, &newEvent, 0) == pdTRUE) {
-      bool play = true;
-      if ((currentMelody == &melWin || currentMelody == &melLose) && newEvent != EVT_START) {
-        play = false;
-      }
-      if (play) {
-        switch (newEvent) {
-          case EVT_START: currentMelody = &melStart; break;
-          case EVT_SHOT_BLUE: currentMelody = &melShotBlue; break;
-          case EVT_SHOT_RED: currentMelody = &melShotRed; break;
-          case EVT_SHOT_GREEN: currentMelody = &melShotGreen; break;
-          case EVT_SHOT_WHITE: currentMelody = &melShotWhite; break;
-          case EVT_MISTAKE: currentMelody = &melMistake; break;
-          case EVT_HIT_SUCCESS: currentMelody = &melHit; break;
-          case EVT_WIN: currentMelody = &melWin; break;
-          case EVT_LOSE: currentMelody = &melLose; break;
-          default: break;
-        }
-        noteIndex = 0;
-        i2s_zero_dma_buffer(I2S_NUM_0);
-      }
-    }
-
-    if (currentMelody != nullptr) {
-      if (noteIndex >= currentMelody->size()) {
-        currentMelody = nullptr;
-        playToneI2S(0, 20);
-        i2s_zero_dma_buffer(I2S_NUM_0);
-      } else {
-        ToneCmd t = (*currentMelody)[noteIndex];
-        playToneI2S(t.freq, t.duration);
-        noteIndex++;
-      }
-    } else {
-      vTaskDelay(5 / portTICK_PERIOD_MS);
-    }
-    // Prevent watchdog reset
-    vTaskDelay(1);
+  switch (color) {
+    case 1:  // Blue button
+      Serial.println(" Blue btn");
+      playSequenceLocal(cfg_snd_shot_b);
+      break;
+    case 2:  // Red button
+      Serial.println(" Red btn");
+      playSequenceLocal(cfg_snd_shot_r);
+      break;
+    case 3:  // Green button
+      Serial.println(" Green btn");
+      playSequenceLocal(cfg_snd_shot_g);
+      break;
+    default:
+      Serial.println(" Unknown btn");
+      playSequenceLocal("100,750");
   }
 }
-*/
 
 
 
-// --------------------------------------------------------------------------
+// ==========================================================================
 // 5. GRAPHICS ENGINE
-// --------------------------------------------------------------------------
+// ==========================================================================
+
+/* ------------------ getColor --------------------
+   Returns the pre loaded CRGB for a logical colour
+   (1 = blue, 2 = red, …, 7 = white, default = black).
+   -------------------------------------------------- */
 CRGB getColor(int colorCode) {
   switch (colorCode) {
     case 1: return col_c1;
@@ -600,119 +704,86 @@ CRGB getColor(int colorCode) {
   }
 }
 
+
+/* ------------------ drawCrispPixel ----------------------
+   Rounds the floating LED position to the nearest pixel index
+   and writes the given colour into the LED buffer (if the index
+   is inside the strip).
+   ---------------------------------------------------------- */
 void drawCrispPixel(float pos, CRGB color) {
   int idx = round(pos);
   if (idx < 0 || idx >= config_num_leds) return;
   leds[idx + ledStartOffset] = color;
 }
 
+
+/* ------------------- flashPixel --------------------------
+   Temporarily lights the LED at pos white (used for hit flashes).
+   ---------------------------------------------------------- */
 void flashPixel(int pos) {
   if (pos >= 0 && pos < config_num_leds) leds[pos + ledStartOffset] = CRGB::White;
 }
 
 
 
-// --------------------------------------------------------------------------
+// ==========================================================================
 // 6. LOGIC & CONFIGURATION (MUST BE BEFORE SETUP)
-// --------------------------------------------------------------------------
-void saveHighscores() {
-  preferences.begin("game", false);
-  preferences.putInt((currentProfilePrefix + "hs").c_str(), highScore);
-  preferences.putInt((currentProfilePrefix + "l1").c_str(), lastGames[0]);
-  preferences.putInt((currentProfilePrefix + "l2").c_str(), lastGames[1]);
-  preferences.putInt((currentProfilePrefix + "l3").c_str(), lastGames[2]);
+// ==========================================================================
 
-  // Save Stats
-  preferences.putULong("st_shots", stat_totalShots);
-  preferences.putULong("st_kills", stat_totalKills);
-  preferences.end();
-}
 
-void loadHighscores() {
-  preferences.begin("game", true);
-  highScore = preferences.getInt((currentProfilePrefix + "hs").c_str(), 0);
-  lastGames[0] = preferences.getInt((currentProfilePrefix + "l1").c_str(), 0);
-  lastGames[1] = preferences.getInt((currentProfilePrefix + "l2").c_str(), 0);
-  lastGames[2] = preferences.getInt((currentProfilePrefix + "l3").c_str(), 0);
+/* -------------------- saveHighscores ----------------------------------
+   Persists the high score, the three most recent game scores, and 
+   total‐shots/kills counters into the ESP32 NVS (Preferences).
+   ----------------------------------------------------------------------- */
 
-  stat_totalShots = preferences.getULong("st_shots", 0);
-  stat_totalKills = preferences.getULong("st_kills", 0);
-  preferences.end();
-}
 
-void registerGameEnd(int finalScore) {
-  lastGames[2] = lastGames[1];
-  lastGames[1] = lastGames[0];
-  lastGames[0] = finalScore;
-  if (finalScore > highScore) highScore = finalScore;
-  saveHighscores();
-}
+
+
 
 void triggerBaseDestruction() {
   playSound(EVT_LOSE);
-  registerGameEnd(currentScore);
   currentState = STATE_BASE_DESTROYED;
   stateTimer = millis();
+  hintLEDsOFF();
 }
 
-void calculateLevelScore() {
-  unsigned long duration = millis() - levelStartTime;
-  int entityCount = 0;
-  if (levels[currentLevel].bossType == 0) entityCount = levels[currentLevel].length;
-  else {
-    if (levels[currentLevel].bossType == 1) entityCount = 9 * boss1Cfg.hpPerLed;
-    else if (levels[currentLevel].bossType == 2) entityCount = 9 * boss2Cfg.hpPerLed;
-    else if (levels[currentLevel].bossType == 3) entityCount = 15 * boss3Cfg.hpPerLed;
-  }
-  int levelMultiplier = currentLevel;
-  int basePoints = entityCount * 100 * levelMultiplier;
-  unsigned long targetTime = 0;
-  if (levels[currentLevel].bossType == 2) targetTime = 38000;
-  else {
-    unsigned long travelTime = config_num_leds * 15;
-    unsigned long processingTime = entityCount * 300;
-    targetTime = 3000 + travelTime + processingTime;
-  }
-  int timeBonus = 0;
-  if (levels[currentLevel].bossType == 3) timeBonus = basePoints;
-  else {
-    if (duration <= targetTime) timeBonus = basePoints;
-    else {
-      float ratio = (float)targetTime / (float)duration;
-      timeBonus = (int)(basePoints * ratio);
-    }
-  }
-  levelAchievedScore = basePoints + timeBonus;
-  levelMaxPossibleScore = basePoints * 2;
-  currentScore += levelAchievedScore;
-}
+
 
 void checkWinCondition() {
   bool won = false;
   if (currentState == STATE_PLAYING && enemies.empty()) won = true;
   if (currentState == STATE_BOSS_PLAYING && bossSegments.empty()) won = true;
   if (won) {
-    calculateLevelScore();
     if (currentLevel >= 10) {
       playSound(EVT_WIN);
-      registerGameEnd(currentScore);
       currentState = STATE_GAME_FINISHED;
+      //      hintLEDsOFF();  //Normal
+      hintLEDsON();  // Reset the hint LEDs. This is temporary for Halloween
     } else {
       // ----- WIN THIS LEVEL ------------------
       playSound(EVT_WIN);
       currentState = STATE_LEVEL_COMPLETED;
       stateTimer = millis();
+
+      // V9 FIX: Initialize score variables for the completion animation
+      levelAchievedScore = 100;  // Or any value you want to display
+      levelMaxPossibleScore = 100;
+
       levelJustFinished = true;  // <<< NEW – we are now waiting
     }
   }
 }
 
+
 void startLevelIntro(int level) {
   playSound(EVT_START);
+
+  /* V9
   if (level == config_start_level) {
     currentScore = 0;
-    stat_lastGameShots = 0;  // Reset session shots
   }
+  */
+
   currentLevel = level;
   currentState = STATE_INTRO;
   stateTimer = millis();
@@ -735,6 +806,11 @@ void startLevelIntro(int level) {
   FastLED.show();
 }
 
+
+/* -------------------- drawLevelIntro ----------------------
+   Helper that draws the static bar used by the intro animation 
+   (used repeatedly while the intro timer runs).
+   ---------------------------------------------------------- */
 void drawLevelIntro(int level) {
   FastLED.clear();
   for (int i = 0; i < config_num_leds; i++) leds[i + ledStartOffset] = CRGB(5, 5, 5);
@@ -755,6 +831,12 @@ void drawLevelIntro(int level) {
   FastLED.show();
 }
 
+
+
+/* ----------------- updateLevelIntro ------------------------------
+   Drives the timed intro animation – flashing the bar, waiting 2 s, then 
+   initialising the enemy or boss data and switching to STATE_PLAYING/STATE_BOSS_PLAYING.
+   ----------------------------------------------------------------- */
 void updateLevelIntro() {
   unsigned long elapsed = millis() - stateTimer;
   if (elapsed > 2000 && elapsed < 4000) {
@@ -771,7 +853,6 @@ void updateLevelIntro() {
   if (elapsed >= 4000) {
     uint8_t bright = map(config_brightness_pct, 10, 100, 25, 255);
     FastLED.setBrightness(bright);
-    levelStartTime = millis();
     if (levels[currentLevel].bossType > 0) {
       currentBossType = levels[currentLevel].bossType;
       bossSegments.clear();
@@ -819,6 +900,11 @@ void updateLevelIntro() {
   }
 }
 
+
+/* ----------------- updateLevelCompletedAnim ----------------------------
+   Shows the “level cleared” animation: a solid colour for 1 s, then a progress
+   bar that visualises the ratio of achieved score to maximum possible score.
+   ----------------------------------------------------------------------- */
 void updateLevelCompletedAnim() {
   unsigned long elapsed = millis() - stateTimer;
   if (elapsed < 1000) {
@@ -830,6 +916,7 @@ void updateLevelCompletedAnim() {
     float pct = (float)levelAchievedScore / (float)levelMaxPossibleScore;
     if (pct > 1.0) pct = 1.0;
     int fillLeds = (int)(config_num_leds * pct);
+
     for (int i = 0; i < fillLeds; i++) leds[i + ledStartOffset] = CRGB(80, 60, 0);
     for (int i = fillLeds; i < config_num_leds; i++) leds[i + ledStartOffset] = CRGB(20, 0, 0);
   } else {
@@ -838,6 +925,11 @@ void updateLevelCompletedAnim() {
   FastLED.show();
 }
 
+
+/* ----------------- updateBaseDestroyedAnim --------------------
+   Blinks the home base LEDs between red and white for 2 s, then
+   sets the state to STATE_GAMEOVER.
+   -------------------------------------------------------------- */
 void updateBaseDestroyedAnim() {
   unsigned long elapsed = millis() - stateTimer;
   if (elapsed < 2000) {
@@ -852,9 +944,15 @@ void updateBaseDestroyedAnim() {
     FastLED.show();
   } else {
     currentState = STATE_GAMEOVER;
+    hintLEDsOFF();
   }
 }
 
+
+/* ------------------ moveBossProjectiles --------------------------------
+   Advances all active boss projectiles toward the home base at the given
+   speed; if any reach the base the game ends via triggerBaseDestruction().
+   ---------------------------------------------------------------------- */
 void moveBossProjectiles(float speed) {
   static unsigned long lastMove = 0;
   float step = (float)speed / 60.0;
@@ -870,9 +968,14 @@ void moveBossProjectiles(float speed) {
 
 
 
-// --------------------------------------------------------------------------
+// ==========================================================================
 // 7. CONFIG & WEB HANDLERS (MUST BE BEFORE SETUP)
-// --------------------------------------------------------------------------
+// ==========================================================================
+
+/* ------------------------ loadColors ------------------------------------
+   Reads saved hex colour strings from NVS, converts them with hexToCRGB,
+   and stores the resulting CRGB globals (col_c1, col_c2, …).
+   ------------------------------------------------------------------------ */
 void loadColors() {
   preferences.begin("colors", true);
   hex_c1 = preferences.getString("c1", "#0000FF");
@@ -895,15 +998,21 @@ void loadColors() {
   col_cb = hexToCRGB(hex_cb);
 }
 
+
+
+/* ----------------------- handleSaveColors --------------------------------
+   HTTP POST handler that receives new hex colour values, writes them to NVS,
+   reloads the colour globals, and redirects back to the colour page.
+   ------------------------------------------------------------------------- */
 void handleSaveColors() {
-  if (server.hasArg("c1")) hex_c1 = server.arg("c1");
-  if (server.hasArg("c2")) hex_c2 = server.arg("c2");
-  if (server.hasArg("c3")) hex_c3 = server.arg("c3");
-  if (server.hasArg("c4")) hex_c4 = server.arg("c4");
-  if (server.hasArg("c5")) hex_c5 = server.arg("c5");
-  if (server.hasArg("c6")) hex_c6 = server.arg("c6");
-  if (server.hasArg("cw")) hex_cw = server.arg("cw");
-  if (server.hasArg("cb")) hex_cb = server.arg("cb");
+  if (server->hasArg("c1")) hex_c1 = server->arg("c1");
+  if (server->hasArg("c2")) hex_c2 = server->arg("c2");
+  if (server->hasArg("c3")) hex_c3 = server->arg("c3");
+  if (server->hasArg("c4")) hex_c4 = server->arg("c4");
+  if (server->hasArg("c5")) hex_c5 = server->arg("c5");
+  if (server->hasArg("c6")) hex_c6 = server->arg("c6");
+  if (server->hasArg("cw")) hex_cw = server->arg("cw");
+  if (server->hasArg("cb")) hex_cb = server->arg("cb");
 
   preferences.begin("colors", false);
   preferences.putString("c1", hex_c1);
@@ -917,10 +1026,15 @@ void handleSaveColors() {
   preferences.end();
 
   loadColors();
-  server.sendHeader("Location", "/colors");
-  server.send(303);
+  server->sendHeader("Location", "/colors");
+  server->send(303);
 }
 
+
+/* ---------------------- loadSounds -----------------------------
+   Reads saved sound string definitions from NVS (or defaults)and
+   parses each into a Melody using melodyFromStr.
+------------------------------------------------------------------ */
 void loadSounds() {
   preferences.begin("snds", true);
   cfg_snd_start = preferences.getString("s_start", DEF_SND_START);
@@ -945,37 +1059,12 @@ void loadSounds() {
   melodyFromStr(melShotWhite, cfg_snd_shot_w);
 }
 
-/// Flagged as not used
-/*
-void handleSaveSounds() {
-  cfg_snd_start = server.arg("s_start");
-  cfg_snd_win = server.arg("s_win");
-  cfg_snd_lose = server.arg("s_lose");
-  cfg_snd_mistake = server.arg("s_mistake");
-  cfg_snd_hit = server.arg("s_hit");
-  cfg_snd_shot_b = server.arg("s_shot_b");
-  cfg_snd_shot_r = server.arg("s_shot_r");
-  cfg_snd_shot_g = server.arg("s_shot_g");
-  cfg_snd_shot_w = server.arg("s_shot_w");
 
-  preferences.begin("snds", false);
-  preferences.putString("s_start", cfg_snd_start);
-  preferences.putString("s_win", cfg_snd_win);
-  preferences.putString("s_lose", cfg_snd_lose);
-  preferences.putString("s_mistake", cfg_snd_mistake);
-  preferences.putString("s_hit", cfg_snd_hit);
-  preferences.putString("s_shot_b", cfg_snd_shot_b);
-  preferences.putString("s_shot_r", cfg_snd_shot_r);
-  preferences.putString("s_shot_g", cfg_snd_shot_g);
-  preferences.putString("s_shot_w", cfg_snd_shot_w);
-  preferences.end();
 
-  loadSounds();
-  server.sendHeader("Location", "/sounds");
-  server.send(303);
-}
-*/
-
+/* ---------------------- applyProfileDefaults -------------------------
+   Fills the level  and boss configuration arrays with the default values 
+   for the three built in profiles (def_, kid_, pro_).
+   --------------------------------------------------------------------- */
 void applyProfileDefaults(String prefix) {
   if (prefix == "def_") {
     // STANDARD PROFILE
@@ -1019,6 +1108,11 @@ void applyProfileDefaults(String prefix) {
   }
 }
 
+
+/* --------------- saveCurrentToPreferences ---------------------
+   Writes the current LED, brightness, start level, level data and
+   boss parameters into NVS under the given profile prefix.
+   ------------------------------------------------------------- */
 void saveCurrentToPreferences(String prefix) {
   preferences.begin("game", false);
   preferences.putInt((prefix + "leds").c_str(), config_num_leds);
@@ -1036,6 +1130,11 @@ void saveCurrentToPreferences(String prefix) {
   preferences.end();
 }
 
+
+/* ------------------ performFactoryReset ---------------------------
+   Erases all user settings, restores the three default profiles,
+   re applies them, and writes a fresh configuration version flag.
+   ------------------------------------------------------------------ */
 void performFactoryReset() {
   preferences.begin("game", true);
   String s = preferences.getString("ssid", "");
@@ -1093,6 +1192,7 @@ void setupDefaultConfig() {
 }
 
 void loadConfig(String prefix) {
+  // Convenience wrapper that simply loads the “standard” profile defaults (def_).
   preferences.begin("game", true);
   config_num_leds = preferences.getInt((prefix + "leds").c_str(), config_num_leds);
   config_brightness_pct = preferences.getInt((prefix + "bright").c_str(), config_brightness_pct);
@@ -1125,9 +1225,14 @@ void loadConfig(String prefix) {
   preferences.end();
 }
 
+
+/* --------------------- handleProfileSwitch --------------------------
+   HTTP POST handler that changes the active profile (def_, kid_, or pro_),
+   saves the selection, reloads defaults and redirects to the main page.
+   ---------------------------------------------------------------------*/
 void handleProfileSwitch() {
-  if (server.hasArg("profile")) {
-    String p = server.arg("profile");
+  if (server->hasArg("profile")) {
+    String p = server->arg("profile");
     if (p == "kid") currentProfilePrefix = "kid_";
     else if (p == "pro") currentProfilePrefix = "pro_";
     else currentProfilePrefix = "def_";
@@ -1136,41 +1241,52 @@ void handleProfileSwitch() {
     preferences.end();
     applyProfileDefaults(currentProfilePrefix);
     loadConfig(currentProfilePrefix);
-    loadHighscores();
-    server.sendHeader("Location", "/");
-    server.send(303);
-  } else server.send(400, "text/plain", "Bad Request");
+    server->sendHeader("Location", "/");
+    server->send(303);
+  } else server->send(400, "text/plain", "Bad Request");
 }
 
+
+/* ------------------- handleReset ---------------------
+   HTTP POST handler that runs performFactoryReset(), 
+   notifies the user and restarts the ESP.
+   ---------------------------------------------------------- */
 void handleReset() {
   performFactoryReset();
-  server.send(200, "text/html", "<h2>Reset successful!</h2><p>Values & Scores wiped. ESP restarting.</p>");
+  // V9  server->send(200, "text/html", "<h2>Reset successful!</h2><p>Values & Scores wiped. ESP restarting.</p>");
   delay(1000);
   ESP.restart();
 }
 
+
+/* ------------------------ handleSave ----------------------------
+   HTTP POST handler for the main configuration page; parses all
+   form fields, validates LED count, stores the new settings in NVS,
+   and restarts the ESP to apply them.
+   --------------------------------------------------------------- */
 void handleSave() {
-  if (server.hasArg("leds")) config_num_leds = server.arg("leds").toInt();
+  // HTTP POST handler that runs performFactoryReset(), notifies the user and restarts the ESP.
+  if (server->hasArg("leds")) config_num_leds = server->arg("leds").toInt();
 
   // --- SANITIZE LED COUNT FROM UI ---
   if (config_num_leds < 30) config_num_leds = 30;
   if (config_num_leds > MAX_LEDS) config_num_leds = MAX_LEDS;
 
-  if (server.hasArg("bright")) config_brightness_pct = server.arg("bright").toInt();
-  if (server.hasArg("startlvl")) config_start_level = server.arg("startlvl").toInt();
-  if (server.hasArg("ssid")) config_ssid = server.arg("ssid");
-  if (server.hasArg("pass")) config_pass = server.arg("pass");
-  config_static_ip = server.hasArg("static_ip");
-  config_ip = server.arg("ip");
-  config_gateway = server.arg("gw");
-  config_subnet = server.arg("sn");
-  config_dns = server.arg("dns");
-  if (server.hasArg("hb_size")) config_homebase_size = server.arg("hb_size").toInt();
-  if (server.hasArg("shot_spd")) config_shot_speed_pct = server.arg("shot_spd").toInt();
-  config_sacrifice_led = server.hasArg("sac_led");
+  if (server->hasArg("bright")) config_brightness_pct = server->arg("bright").toInt();
+  if (server->hasArg("startlvl")) config_start_level = server->arg("startlvl").toInt();
+  if (server->hasArg("ssid")) config_ssid = server->arg("ssid");
+  if (server->hasArg("pass")) config_pass = server->arg("pass");
+  config_static_ip = server->hasArg("static_ip");
+  config_ip = server->arg("ip");
+  config_gateway = server->arg("gw");
+  config_subnet = server->arg("sn");
+  config_dns = server->arg("dns");
+  if (server->hasArg("hb_size")) config_homebase_size = server->arg("hb_size").toInt();
+  if (server->hasArg("shot_spd")) config_shot_speed_pct = server->arg("shot_spd").toInt();
+  config_sacrifice_led = server->hasArg("sac_led");
 
-  config_sound_on = server.hasArg("snd_on");
-  if (server.hasArg("vol")) config_volume_pct = server.arg("vol").toInt();
+  config_sound_on = server->hasArg("snd_on");
+  if (server->hasArg("vol")) config_volume_pct = server->arg("vol").toInt();
 
   preferences.begin("game", false);
   preferences.putInt("version", CONFIG_VERSION);
@@ -1193,93 +1309,118 @@ void handleSave() {
   preferences.putInt((p + "bright").c_str(), config_brightness_pct);
   preferences.putInt((p + "startlvl").c_str(), config_start_level);
   for (int i = 1; i <= 10; i++) {
-    levels[i].speed = server.arg("lspd" + String(i)).toInt();
-    levels[i].length = server.arg("llen" + String(i)).toInt();
-    levels[i].bossType = server.arg("lboss" + String(i)).toInt();
+    levels[i].speed = server->arg("lspd" + String(i)).toInt();
+    levels[i].length = server->arg("llen" + String(i)).toInt();
+    levels[i].bossType = server->arg("lboss" + String(i)).toInt();
     preferences.putInt((p + "l" + String(i) + "s").c_str(), levels[i].speed);
     preferences.putInt((p + "l" + String(i) + "l").c_str(), levels[i].length);
     preferences.putInt((p + "l" + String(i) + "b").c_str(), levels[i].bossType);
   }
-  boss1Cfg.moveSpeed = server.arg("b1mv").toInt();
-  boss1Cfg.shotSpeed = server.arg("b1ss").toInt();
-  boss1Cfg.hpPerLed = server.arg("b1hp").toInt();
-  boss1Cfg.shotFreq = server.arg("b1fr").toInt();
+  boss1Cfg.moveSpeed = server->arg("b1mv").toInt();
+  boss1Cfg.shotSpeed = server->arg("b1ss").toInt();
+  boss1Cfg.hpPerLed = server->arg("b1hp").toInt();
+  boss1Cfg.shotFreq = server->arg("b1fr").toInt();
   preferences.putBytes((p + "b1").c_str(), &boss1Cfg, sizeof(BossConfig));
-  boss2Cfg.moveSpeed = server.arg("b2mv").toInt();
-  boss2Cfg.shotSpeed = server.arg("b2ss").toInt();
-  boss2Cfg.hpPerLed = server.arg("b2hp").toInt();
-  boss2Cfg.shotFreq = server.arg("b2fr").toInt();
-  boss2Cfg.m1 = server.arg("b2m1").toInt();
-  boss2Cfg.m2 = server.arg("b2m2").toInt();
-  boss2Cfg.m3 = server.arg("b2m3").toInt();
+  boss2Cfg.moveSpeed = server->arg("b2mv").toInt();
+  boss2Cfg.shotSpeed = server->arg("b2ss").toInt();
+  boss2Cfg.hpPerLed = server->arg("b2hp").toInt();
+  boss2Cfg.shotFreq = server->arg("b2fr").toInt();
+  boss2Cfg.m1 = server->arg("b2m1").toInt();
+  boss2Cfg.m2 = server->arg("b2m2").toInt();
+  boss2Cfg.m3 = server->arg("b2m3").toInt();
   preferences.putBytes((p + "b2").c_str(), &boss2Cfg, sizeof(BossConfig));
-  boss3Cfg.moveSpeed = server.arg("b3mv").toInt();
+  boss3Cfg.moveSpeed = server->arg("b3mv").toInt();
   boss3Cfg.shotSpeed = 0;
-  boss3Cfg.hpPerLed = server.arg("b3hp").toInt();
-  boss3Cfg.shotFreq = server.arg("b3fr").toInt();
-  boss3Cfg.burstCount = server.arg("b3bc").toInt();
+  boss3Cfg.hpPerLed = server->arg("b3hp").toInt();
+  boss3Cfg.shotFreq = server->arg("b3fr").toInt();
+  boss3Cfg.burstCount = server->arg("b3bc").toInt();
   preferences.putBytes((p + "b3").c_str(), &boss3Cfg, sizeof(BossConfig));
 
   preferences.end();
 
   // Redirect browser to root, then restart so new settings take effect
-  server.sendHeader("Location", "/");
-  server.send(303);
+  server->sendHeader("Location", "/");
+  server->send(303);
 
   delay(500);     // give the TCP stack a moment to send the redirect
   ESP.restart();  // reboot and apply saved settings
 }
 
 
+/* ------------------------- handleContinue ---------------------------
+   HTTP POST handler for the “/next” endpoint; if a level was just won
+   (levelJustFinished == true) it calls continueToNextLevel() and
+   returns a 200 response, otherwise a 400 error.
+   ------------------------------------------------------------------- */
 void handleContinue() {
   if (levelJustFinished) {
     continueToNextLevel();
-    server.send(200, "text/plain", "Next level started");
+
+    String responsePage = "<html><head><meta http-equiv='refresh' content='2;url=/'></head>";
+    responsePage += "<body style='font-family: sans-serif; background: #111; color: #eee; padding: 20px; text-align: center;'>";
+    responsePage += "<h2 style='color: #0f0;'>🎮 LEVEL " + String(currentLevel) + " STARTED!</h2>";
+    responsePage += "<p>Returning to main page...</p>";
+    responsePage += "</body></html>";
+
+    server->send(200, "text/html", responsePage);
   } else {
-    server.send(400, "text/plain", "No finished level to continue");
+    String errorPage = "<html><head><meta http-equiv='refresh' content='3;url=/'></head>";
+    errorPage += "<body style='font-family: sans-serif; background: #111; color: #eee; padding: 20px; text-align: center;'>";
+    errorPage += "<h2 style='color: red;'>❌ NO LEVEL TO CONTINUE</h2>";
+    errorPage += "<p>Returning to main page...</p>";
+    errorPage += "</body></html>";
+
+    server->send(200, "text/html", errorPage);
   }
 }
 
 
+
+
+
 String getUpdateHTML() {
-  String h = "<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>";
-  h += "<title>Firmware Update</title>";
-  h += "<style>body{font-family:sans-serif;background:#111;color:#eee;padding:20px;max-width:600px;margin:auto;} h2{color:#0f0;} input{width:100%;margin-bottom:10px;padding:10px;}</style>";
-  h += "</head><body><h2>SYSTEM UPDATE</h2>";
-  h += "<p>Upload .bin file from Arduino IDE (Sketch -> Export Compiled Binary).</p>";
-  h += "<form method='POST' action='/update' enctype='multipart/form-data'><input type='file' name='update'><br><button type='submit' style='padding:15px;background:#00f;color:white;font-weight:bold;width:100%;cursor:pointer;'>UPDATE FIRMWARE</button></form>";
-  h += "<br><a href='/' style='color:#0f0;'>Back</a></body></html>";
-  return h;
+  return R"(
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset='UTF-8'>
+    <meta name='viewport' content='width=device-width, initial-scale=1.0'>
+    <title>Firmware Update</title>
+    <style>
+        body { font-family: sans-serif; background: #111; color: #eee; padding: 20px; max-width: 600px; margin: auto; }
+        h2 { color: #0f0; }
+        #status { margin: 20px 0; font-size: 1.2em; }
+    </style>
+</head>
+<body>
+    <h2>FIRMWARE UPDATE</h2>
+    <p>Upload .bin file from Arduino IDE</p>
+    
+    <form method='POST' action='/update' enctype='multipart/form-data'>
+        <input type='file' name='update'><br><br>
+        <button type='submit'>UPDATE FIRMWARE</button>
+    </form>
+    
+    <div id='status'></div>
+    <br><a href='/'>Back to Main Menu</a>
+    
+    <script>
+        document.querySelector('form').addEventListener('submit', function() {
+            document.getElementById('status').textContent = 'Upload in progress...';
+            // The browser will naturally show upload progress in the status bar
+        });
+    </script>
+</body>
+</html>
+)";
 }
 
-String getColorHTML() {
-  String h = "<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>";
-  h += "<title>Color Config</title>";
-  h += "<style>body{font-family:sans-serif;background:#111;color:#eee;padding:10px;max-width:800px;margin:auto;}input,button{width:100%;background:#333;color:#fff;border:1px solid #555;padding:8px;border-radius:4px;box-sizing:border-box;margin-bottom:5px;} .sec{margin-top:15px;border-top:1px solid #555;padding-top:15px;background:#222;padding:15px;border-radius:5px;} h3{margin-top:0;color:#0f0;} input[type=color] { height: 50px; cursor: pointer; } a { color: #00ff00; text-decoration: none; }</style>";
-  h += "</head><body>";
-  h += "<h2>🎨 CUSTOM COLORS</h2>";
-  h += "<form action='/savecolors' method='POST'>";
 
-  h += "<div class='sec'><h3>Main Enemies (Types 1-3)</h3>";
-  h += "Type 1 (Blue btn): <input type='color' name='c1' value='" + hex_c1 + "'>";
-  h += "Type 2 (Red btn): <input type='color' name='c2' value='" + hex_c2 + "'>";
-  h += "Type 3 (Green btn): <input type='color' name='c3' value='" + hex_c3 + "'></div>";
 
-  h += "<div class='sec'><h3>Boss / Mix Colors</h3>";
-  h += "Mix Color 1: <input type='color' name='c4' value='" + hex_c4 + "'>";
-  h += "Mix Color 2: <input type='color' name='c5' value='" + hex_c5 + "'>";
-  h += "Mix Color 3: <input type='color' name='c6' value='" + hex_c6 + "'>";
-  h += "Boss Generic/Dark: <input type='color' name='cb' value='" + hex_cb + "'></div>";
-
-  h += "<div class='sec'><h3>Player Shots</h3>";
-  h += "Combo Shot (White): <input type='color' name='cw' value='" + hex_cw + "'></div>";
-
-  h += "<br><button type='submit' style='background:#009900;font-size:1.2em;'>SAVE COLORS</button>";
-  h += "</form><br><a href='/'>&laquo; Back to Main Menu</a>";
-  h += "</body></html>";
-  return h;
-}
-
+/* ------------------------ getSoundHTML -------------------------
+   Returns the HTML page that lets the user edit the frequency/duration
+   strings for the various game sound events.
+---------------------------------------------------------------- */
 String getSoundHTML() {
   String h = "<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>";
   h += "<title>Sound Config</title>";
@@ -1305,10 +1446,14 @@ String getSoundHTML() {
   return h;
 }
 
+/* -------------------------------- getHTML -------------------------------
+   Returns the main configuration web page (LED count, brightness, Wi Fi,
+   level table, boss parameters, stats, and navigation links).
+   --------------------------------------------------------------- */
 String getHTML() {
   String h = "<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>";
   h += "<title>Ultimate RGB Invaders</title>";
-  h += "<style>body{font-family:sans-serif;background:#111;color:#eee;padding:10px;max-width:800px;margin:auto;}input,select,button{width:100%;background:#333;color:#fff;border:1px solid #555;padding:8px;border-radius:4px;box-sizing:border-box;margin-bottom:5px;}table{width:100%;border-collapse:collapse;margin-bottom:10px;} td,th{border:1px solid #444;padding:6px;text-align:center;}.sec{margin-top:25px;border-top:1px solid #555;padding-top:15px;background:#222;padding:15px;border-radius:5px;}#warning-box{margin-top:10px;padding:10px;background:#b30000;color:#fff;border:1px solid #ff0000;display:none;font-weight:bold;border-radius:4px;}.val-highlight{color:#0f0;font-weight:bold;}h2,h3{margin-top:0;} pre{font-family:monospace;color:#0f0;font-size:12px;overflow-x:auto;} .score-box{background:#004d00; border:2px solid #00ff00; padding:15px; text-align:center; margin-bottom:15px; border-radius:8px;} .big-score{font-size:32px; font-weight:bold; color:#fff;} .small-score{font-size:14px; color:#aaa;}";
+  h += "<style>body{font-family:sans-serif;background:#111;color:#eee;padding:10px;max-width:800px;margin:auto;}input,select,button{width:100%;background:#333;color:#fff;border:1px solid #555;padding:8px;border-radius:4px;box-sizing:border-box;margin-bottom:5px;}table{width:100%;border-collapse:collapse;margin-bottom:10px;} td,th{border:1px solid #444;padding:6px;text-align:center;}.sec{margin-top:25px;border-top:1px solid #555;padding-top:15px;background:#222;padding:15px;border-radius:5px;}#warning-box{margin-top:10px;padding:10px;background:#b30000;color:#fff;border:1px solid #ff0000;display:none;font-weight:bold;border-radius:4px;}.val-highlight{color:#0f0;font-weight:bold;}h2,h3{margin-top:0;} pre{font-family:monospace;color:#0f0;font-size:12px;overflow-x:auto;} .score-box{background:#004d00; border:2px solid #00ff00; padding:15px; text-align:center; margin-bottom:15px; border-radius:8px;} ";
   h += " .b-card { background: #2a2a2a; padding: 15px; border-radius: 5px; margin-bottom: 15px; border: 1px solid #444; }";
   h += " .b-head { font-size: 1.1em; font-weight: bold; margin-bottom: 10px; color: #fff; border-bottom: 1px solid #555; padding-bottom: 5px; }";
   h += " .form-grid { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 10px; }";
@@ -1324,16 +1469,7 @@ String getHTML() {
   h += "<script>function updateCalc() { var count = parseInt(document.getElementById('ledCount').value)||0; var brightPct = parseInt(document.getElementById('brightness').value)||50; document.getElementById('brightVal').innerText = brightPct + '%'; var warn = document.getElementById('warning-box'); if (count > 0) { var brightFactor = brightPct / 100.0; var amps = ((count * 15 * brightFactor) + 120) / 1000; document.getElementById('ampValue').innerText = amps.toFixed(2) + ' A'; if(amps > 5.0) { warn.style.display='block'; warn.innerText='WARNING: > 5A! High Power PSU required!'; } else warn.style.display='none'; } } function toggleIP() { var x = document.getElementById('ipsettings'); if(document.getElementById('chkStatic').checked) x.style.display='block'; else x.style.display='none'; } function confirmReset() { return confirm('Really delete all settings and factory reset?'); } window.onload = function(){ updateCalc(); toggleIP(); };</script>";
   h += "</head><body>";
   h += "<div class='neon-text'>RGB INVADERS</div>";
-  h += "<div class='sub-head'>created by Qwer.Tzui / WorksAsDesigned - Version 10.0 (Final)</div>";
-  h += "<div class='score-box'>ALL TIME BEST<div class='big-score'>" + String(highScore) + "</div>";
-  h += "<div class='small-score'>Last Games: " + String(lastGames[0]) + " | " + String(lastGames[1]) + " | " + String(lastGames[2]) + "</div></div>";
-
-  // STATS DISPLAY
-  h += "<div class='sec'><h3>Battle Statistics</h3><div class='stat-grid'>";
-  h += "<div class='stat-box'><div class='stat-val'>" + String(stat_totalShots) + "</div><div>Total Shots</div></div>";
-  h += "<div class='stat-box'><div class='stat-val'>" + String(stat_totalKills) + "</div><div>Alien Kills</div></div>";
-  h += "<div class='stat-box'><div class='stat-val'>" + String(stat_lastGameShots) + "</div><div>Last Game Shots</div></div>";
-  h += "</div></div>";
+  h += "<div class='sub-head'>Version " + String(VERSION);
 
   // BUTTONS TO CONFIG PAGES
   h += "<div style='display:flex;gap:10px;justify-content:center;margin-bottom:20px;margin-top:20px;'>";
@@ -1405,6 +1541,39 @@ String getHTML() {
   return h;
 }
 
+String getColorHTML() {
+  String h = "<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>";
+  h += "<title>Color Config</title>";
+  h += "<style>body{font-family:sans-serif;background:#111;color:#eee;padding:10px;max-width:800px;margin:auto;}input,button{width:100%;background:#333;color:#fff;border:1px solid #555;padding:8px;border-radius:4px;box-sizing:border-box;margin-bottom:5px;} .sec{margin-top:15px;border-top:1px solid #555;padding-top:15px;background:#222;padding:15px;border-radius:5px;} h3{margin-top:0;color:#0f0;} input[type=color] { height: 50px; cursor: pointer; } a { color: #00ff00; text-decoration: none; }</style>";
+  h += "</head><body>";
+  h += "<h2>🎨 CUSTOM COLORS</h2>";
+  h += "<form action='/savecolors' method='POST'>";
+
+  h += "<div class='sec'><h3>Main Enemies (Types 1-3)</h3>";
+  h += "Type 1 (Blue btn): <input type='color' name='c1' value='" + hex_c1 + "'>";
+  h += "Type 2 (Red btn): <input type='color' name='c2' value='" + hex_c2 + "'>";
+  h += "Type 3 (Green btn): <input type='color' name='c3' value='" + hex_c3 + "'></div>";
+
+  h += "<div class='sec'><h3>Boss / Mix Colors</h3>";
+  h += "Mix Color 1: <input type='color' name='c4' value='" + hex_c4 + "'>";
+  h += "Mix Color 2: <input type='color' name='c5' value='" + hex_c5 + "'>";
+  h += "Mix Color 3: <input type='color' name='c6' value='" + hex_c6 + "'>";
+  h += "Boss Generic/Dark: <input type='color' name='cb' value='" + hex_cb + "'></div>";
+
+  h += "<div class='sec'><h3>Player Shots</h3>";
+  h += "Combo Shot (White): <input type='color' name='cw' value='" + hex_cw + "'></div>";
+
+  h += "<br><button type='submit' style='background:#009900;font-size:1.2em;'>SAVE COLORS</button>";
+  h += "</form><br><a href='/'>&laquo; Back to Main Menu</a>";
+  h += "</body></html>";
+  return h;
+}
+
+
+/* ---------------------------- enableWiFi ----------------------------------------
+   Starts the ESP32 in AP+STA mode, connects to the configured Wi Fi network (if any),
+   launches the captive AP “ESP RGB INVADERS”, and starts the HTTP server.
+   -------------------------------------------------------------------------------- */
 void enableWiFi() {
   FastLED.clear();
   FastLED.show();
@@ -1419,187 +1588,372 @@ void enableWiFi() {
     }
   }
   WiFi.softAP("ESP-RGB-INVADERS", "12345678");
-  server.begin();
+  server->begin();
 }
 
 
-// --------------------------------------------------------------------------
-// 8. SETUP
-// --------------------------------------------------------------------------
-void setup() {
+void handleSaveSounds() {
+  cfg_snd_start = server->arg("s_start");
+  cfg_snd_win = server->arg("s_win");
+  cfg_snd_lose = server->arg("s_lose");
+  cfg_snd_mistake = server->arg("s_mistake");
+  cfg_snd_hit = server->arg("s_hit");
+  cfg_snd_shot_b = server->arg("s_shot_b");
+  cfg_snd_shot_r = server->arg("s_shot_r");
+  cfg_snd_shot_g = server->arg("s_shot_g");
+  cfg_snd_shot_w = server->arg("s_shot_w");
 
-  /*
-  preferences.begin("game", false);
-  preferences.clear();
+  preferences.begin("snds", false);
+  preferences.putString("s_start", cfg_snd_start);
+  preferences.putString("s_win", cfg_snd_win);
+  preferences.putString("s_lose", cfg_snd_lose);
+  preferences.putString("s_mistake", cfg_snd_mistake);
+  preferences.putString("s_hit", cfg_snd_hit);
+  preferences.putString("s_shot_b", cfg_snd_shot_b);
+  preferences.putString("s_shot_r", cfg_snd_shot_r);
+  preferences.putString("s_shot_g", cfg_snd_shot_g);
+  preferences.putString("s_shot_w", cfg_snd_shot_w);
   preferences.end();
-  ESP.restart();
-*/
+
+  loadSounds();
+  server->sendHeader("Location", "/sounds");
+  server->send(303);
+}
+
+
+
+
+// ==========================================================================
+// 8. SETUP
+// ==========================================================================
+void setup() {
+  // -----------------------------
+  // 1. SERIAL + BASIC GPIO
+  // -----------------------------
+  currentState = STATE_MENU;  // Add this line to ensure we start in menu state
 
   Serial.begin(115200);
   Serial.println();
-  Serial.println("SETUP: start");
+  Serial.println();
+  Serial.print("=== SPACE INVADERS V");
+  Serial.print(VERSION);
+  Serial.println(" ===");
+  Serial.printf("Free sketch space: %u bytes\n", ESP.getFreeSketchSpace());
+
+
   pinMode(PIN_BTN_BLUE, INPUT_PULLUP);
   pinMode(PIN_BTN_RED, INPUT_PULLUP);
   pinMode(PIN_BTN_GREEN, INPUT_PULLUP);
   pinMode(PIN_BTN_WHITE, INPUT_PULLUP);
-  pinMode(PIN_BTN_CONTINUE, INPUT_PULLUP);  // <<< NEW
+  pinMode(PIN_BTN_CONTINUE, INPUT_PULLUP);
 
+  // -------------------------------------------------
+  // Initialise the hint LEDs (all OFF)
+  // -------------------------------------------------
+  pinMode(PIN_HINT_RED, OUTPUT);
+  pinMode(PIN_HINT_BLUE, OUTPUT);
+  pinMode(PIN_HINT_GREEN, OUTPUT);
+
+  // Reset the hint LEDs.
+  hintLEDsOFF();
+
+  pinMode(PIN_GPIO19_LED, OUTPUT);
+  digitalWrite(PIN_GPIO19_LED, LOW);
+
+  // Initialize speaker pin (V7)
+  pinMode(SPEAKER_PIN, OUTPUT);
+  digitalWrite(SPEAKER_PIN, LOW);
+
+
+  // -----------------------------
+  // 2. CONFIG + PREFERENCES
+  // -----------------------------
   setupDefaultConfig();
+
   preferences.begin("game", true);
   int storedVer = preferences.getInt("version", 0);
   preferences.end();
+
   if (storedVer < CONFIG_VERSION) {
     performFactoryReset();
     ESP.restart();
   }
+
   preferences.begin("game", true);
   currentProfilePrefix = preferences.getString("act_prof", "def_");
+  String wifiSsid = preferences.getString("ssid", "");
+  String wifiPass = preferences.getString("pass", "");
+  wifiSsid.trim();
+  wifiPass.trim();
+  Serial.print("SSID= ");
+  Serial.println(wifiSsid);
+  Serial.print("PASS= ");
+  Serial.println(wifiPass);
+
   preferences.end();
+
   loadConfig(currentProfilePrefix);
 
   // --- SANITIZE LED COUNT FROM UI ---
-  if (config_num_leds < 30) config_num_leds = 30;  // minimum safe strip
+  if (config_num_leds < 30) config_num_leds = 30;
   if (config_num_leds > MAX_LEDS) config_num_leds = MAX_LEDS;
 
 
-  loadHighscores();
   loadSounds();
   loadColors();
 
+  // -----------------------------
+  // 3. FASTLED
+  // -----------------------------
   Serial.println("SETUP: FastLED");
   FastLED.addLeds<LED_TYPE, PIN_LED_DATA, COLOR_ORDER>(leds, config_num_leds + 1);
-
   FastLED.setBrightness(map(config_brightness_pct, 10, 100, 25, 255));
   FastLED.setDither(0);
-
-  // 4. POWER PROTECTION
-  FastLED.setMaxPowerInVoltsAndMilliamps(5, 2500);  // 2.5 Amps limit
+  FastLED.setMaxPowerInVoltsAndMilliamps(5, 2500);
 
   if (config_sacrifice_led) leds[0] = CRGB(20, 0, 0);
   FastLED.show();
 
-  Serial.println("SETUP: before 'xQueueCreate()'");
-  // --- AUDIO SETUP CORE 0 ---
-  ///audioQueue = xQueueCreate(10, sizeof(SoundEvent));
-  ///Serial.print("audioQueue handle: ");
-  ///Serial.println((uint32_t)audioQueue, HEX);
-
-  ///xTaskCreatePinnedToCore(audioTask, "AudioTask", 4096, NULL, 1, &audioTaskHandle, 0);
-
-  Serial.println("SETUP: before 'Web Routes'");
-  WiFi.mode(WIFI_OFF);
-
-  // WEB ROUTES
-  server.on("/", []() {
-    server.send(200, "text/html", getHTML());
-  });
-  server.on("/save", handleSave);
-  server.on("/loadprofile", handleProfileSwitch);
-  server.on("/reset", handleReset);
-  server.on("/sounds", []() {
-    server.send(200, "text/html", getSoundHTML());
-  });
-  /////  server.on("/savesounds", handleSaveSounds);
-  server.on("/colors", []() {
-    server.send(200, "text/html", getColorHTML());
-  });
-  server.on("/savecolors", handleSaveColors);
-
-  Serial.println("SETUP: before 'OTA Handlers'");
-  // OTA HANDLERS
-  server.on("/update", HTTP_GET, []() {
-    server.send(200, "text/html", getUpdateHTML());
-  });
-  server.on(
-    "/update", HTTP_POST, []() {
-      server.send(200, "text/plain", (Update.hasError()) ? "UPDATE FAILED" : "UPDATE SUCCESS! RESTARTING...");
-      ESP.restart();
-    },
-    []() {
-      HTTPUpload &upload = server.upload();
-      if (upload.status == UPLOAD_FILE_START) {
-        if (!Update.begin(UPDATE_SIZE_UNKNOWN)) Update.printError(Serial);
-      } else if (upload.status == UPLOAD_FILE_WRITE) {
-        if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) Update.printError(Serial);
-      } else if (upload.status == UPLOAD_FILE_END) {
-        if (Update.end(true)) Serial.printf("Update Success: %u\n", upload.totalSize);
-        else Update.printError(Serial);
-      }
-    });
-
-  server.on("/next", HTTP_POST, handleContinue);  // <<< NEW
-
+  // -----------------------------
+  // 4. GAME STARTUP (NO UDP / SOUND YET)
+  // -----------------------------
+  Serial.println("SETUP: 4. Game Startup");
   startLevelIntro(config_start_level);
 
   FastLED.clear();
-  for (int i = 0; i <= config_num_leds; i += 2) leds[i + ledStartOffset] = CRGB::Green;
+  for (int i = 0; i <= config_num_leds; i += 2)
+    leds[i + ledStartOffset] = CRGB::Green;
   FastLED.show();
   delay(500);
 
-  // --- ALWAYS-ON WIFI (STA MODE) ---
-  WiFi.mode(WIFI_STA);
-  WiFi.begin("Kaywinnet", "806194edb8");
+  // -------------------------------------
+  // 5. WIFI (MUST COME BEFORE SERVER/UDP)
+  // -------------------------------------
+  Serial.println("SETUP: 5. WiFi begin");
 
-  Serial.print("Connecting to WiFi");
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(200);
-    Serial.print(".");
+  if (wifiSsid.length() == 0) {
+    // No stored credentials → AP mode for config
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP("InvadersSetup", "12345678");
+    Serial.print("AP IP: ");
+    Serial.println(WiFi.softAPIP());
+  } else {
+    // Debug
+    Serial.print("SSID from prefs: '");
+    Serial.print(wifiSsid);
+    Serial.println("'");
+
+    Serial.print("PASS from prefs: '");
+    Serial.print(wifiPass);
+    Serial.println("'");
+
+    // Try STA with stored credentials
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(wifiSsid.c_str(), wifiPass.c_str());
+
+    Serial.print("Connecting to WiFi");
+    unsigned long start = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - start < 8000) {
+      delay(200);
+      Serial.print(".");
+    }
+    Serial.println();
+
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.print("IP: ");
+      Serial.println(WiFi.localIP());
+      Serial.print("MAC: ");
+      Serial.println(WiFi.macAddress());
+    } else {
+      // Fallback to AP if STA fails
+      Serial.println("WiFi STA failed, starting AP");
+      WiFi.mode(WIFI_AP);
+      WiFi.softAP("InvadersSetup", "12345678");
+      Serial.print("AP IP: ");
+      Serial.println(WiFi.softAPIP());
+    }
   }
 
-  Serial.println();
-  Serial.print("IP: ");
-  Serial.println(WiFi.localIP());
-  Serial.print("MAC: ");
-  Serial.println(WiFi.macAddress());
 
-  // Start web server
-  server.begin();
+  // -----------------------------
+  // 6. CREATE WEB SERVER
+  // -----------------------------
+  Serial.println("SETUP: Creating WebServer");
+  server = new WebServer(80);
+
+  // WEB ROUTES
+  server->on("/", []() {
+    server->send(200, "text/html", getHTML());
+  });
+  server->on("/save", handleSave);
+  server->on("/loadprofile", handleProfileSwitch);
+  server->on("/reset", handleReset);
+  server->on("/sounds", []() {
+    server->send(200, "text/html", getSoundHTML());
+  });
+  server->on("/savesounds", handleSaveSounds);
+  server->on("/colors", []() {
+    server->send(200, "text/html", getColorHTML());
+  });
+  server->on("/savecolors", handleSaveColors);
+  server->on("/update", HTTP_GET, []() {
+    server->send(200, "text/html", getUpdateHTML());
+  });
+
+
+  server->on(
+    "/update", HTTP_POST,
+    []() {
+      server->sendHeader("Connection", "close");
+
+      if (Update.hasError()) {
+        // Error page with auto-redirect
+        String errorPage = "<html><head><meta http-equiv='refresh' content='3;url=/'></head>";
+        errorPage += "<body style='font-family: sans-serif; background: #111; color: #eee; padding: 20px; text-align: center;'>";
+        errorPage += "<h2 style='color: red;'>❌ UPDATE FAILED</h2>";
+        errorPage += "<p>Returning to main page in 3 seconds...</p>";
+        errorPage += "<p><a href='/' style='color: #0f0;'>Click here if not redirected</a></p>";
+        errorPage += "</body></html>";
+        server->send(200, "text/html", errorPage);
+      } else {
+        // Success page with auto-redirect
+        String successPage = "<html><head><meta http-equiv='refresh' content='3;url=/'></head>";
+        successPage += "<body style='font-family: sans-serif; background: #111; color: #eee; padding: 20px; text-align: center;'>";
+        successPage += "<h2 style='color: #0f0;'>UPDATE SUCCESSFUL!</h2>";
+        successPage += "<p>Device restarting... You'll be redirected to the main page.</p>";
+        successPage += "<p><a href='/' style='color: #0f0;'>Click here if not redirected</a></p>";
+        successPage += "</body></html>";
+        server->send(200, "text/html", successPage);
+
+        Serial.println("Update successful! Restarting in 3 seconds...");
+        delay(3000);  // Show message for 3 seconds
+      }
+
+      ESP.restart();
+    },
+    []() {
+      HTTPUpload &upload = server->upload();
+
+      if (upload.status == UPLOAD_FILE_START) {
+        Serial.printf("Update: %s\n", upload.filename.c_str());
+        if (!upload.filename.endsWith(".bin")) return;
+
+        uint32_t maxSketchSpace = (ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000;
+        if (!Update.begin(maxSketchSpace, U_FLASH)) {
+          Update.printError(Serial);
+        }
+      } else if (upload.status == UPLOAD_FILE_WRITE) {
+        Update.write(upload.buf, upload.currentSize);
+      } else if (upload.status == UPLOAD_FILE_END) {
+        Update.end(true);
+      }
+
+      yield();
+    });
+
+
+
+
+
+
+
+
+  server->on("/progress", HTTP_GET, []() {
+    int progress = 0;
+
+    // Simple progress calculation
+    if (update_inProgress) {
+      const size_t TYPICAL_FILE_SIZE = 924240;
+      if (update_currentSize > 0) {
+        progress = (update_currentSize * 100) / TYPICAL_FILE_SIZE;
+        if (progress > 100) progress = 100;
+      }
+    } else if (update_status == "Success! Restarting...") {
+      progress = 100;
+    }
+
+    String jsonResponse = "{\"progress\":" + String(progress) + ",\"status\":\"" + update_status + "\"}";
+    server->send(200, "application/json", jsonResponse);
+  });
+
+
+
+  server->on("/next", HTTP_POST, handleContinue);
+
+  server->on("/status", HTTP_GET, []() {
+    String h = "<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>";
+    h += "<title>Update Status</title>";
+    h += "<style>";
+    h += "body { font-family: sans-serif; background: #111; color: #eee; padding: 20px; max-width: 600px; margin: auto; }";
+    h += "h2 { color: #0f0; }";
+    h += ".spinner { display: inline-block; width: 20px; height: 20px; border: 3px solid rgba(255,255,255,.3); border-radius: 50%; border-top-color: #fff; animation: spin 1s ease-in-out infinite; margin-right: 10px; }";
+    h += "@keyframes spin { to { transform: rotate(360deg); } }";
+    h += "</style>";
+    h += "<script>";
+    h += "function updateStatus() {";
+    h += "  fetch('/progress')";
+    h += "    .then(response => response.json())";
+    h += "    .then(data => {";
+    h += "      document.getElementById('status').innerHTML = '<div class=\"spinner\"></div> ' + data.status;";
+    h += "      if (data.progress >= 100 || data.status.includes('Success') || data.status.includes('Error')) {";
+    h += "        clearInterval(intervalId);";
+    h += "        if (data.status.includes('Success')) {";
+    h += "          document.getElementById('status').innerHTML = '✅ Update complete! Device is restarting...';";
+    h += "        }";
+    h += "      }";
+    h += "    });";
+    h += "}";
+    h += "var intervalId = setInterval(updateStatus, 1000);";
+    h += "updateStatus();";  // Run immediately
+    h += "</script>";
+    h += "</head><body>";
+    h += "<h2>UPDATE IN PROGRESS</h2>";
+    h += "<div id='status'><div class='spinner'></div> Starting update...</div>";
+    h += "<br><a href='/' style='color:#0f0;'>Back to Main Menu</a>";
+    h += "</body></html>";
+
+    server->send(200, "text/html", h);
+  });
+
+
+
+  // -----------------------------
+  // 7. START WEB SERVER
+  // -----------------------------
+  server->begin();
   Serial.println("Web server started");
 
+  // -----------------------------
+  // 8. START UDP
+  // -----------------------------
+  udp.begin(4210);
+  Serial.println("UDP ready");
 
   Serial.println("SETUP: end");
+  hintLEDsON();  // Reset the hint LEDs. This is temporary for Halloween
 }
 
 
 
 
-// ---------------------------------------------------------------------------
+// ============================================================================
 // loop
-// ---------------------------------------------------------------------------
+// ============================================================================
 void loop() {
   unsigned long now = millis();
   if (now - lastLoopTime < FRAME_DELAY) return;
   lastLoopTime = now;
 
-  // Always process web requests
-  server.handleClient();
+  /* --------------------------------------------------------------
+     Always handle web requests (the tiny config UI)
+     -------------------------------------------------------------- */
+  server->handleClient();
 
-  /*
-  if (wifiMode) {
-    server.handleClient();
-    static unsigned long lastWifiLedUpdate = 0;
-    if (now - lastWifiLedUpdate > 2000) {
-      lastWifiLedUpdate = now;
-      FastLED.clear();
-      for (int i = 0; i <= config_num_leds; i += 2) leds[i + ledStartOffset] = CRGB::Blue;
-      FastLED.show();
-    }
-    // EXIT WIFI MODE
-    if (digitalRead(PIN_BTN_WHITE) == LOW) {
-      delay(200);
-      ESP.restart();
-    }
-    return;
-  }
-*/
-
-  // 6. SETUP MODE FEEDBACK
-  // -----------------------------------------------------------------
-  //  WHITE BUTTON (GPIO 32) – Reset / Continue handling
-  // -----------------------------------------------------------------
-  if (digitalRead(PIN_BTN_WHITE) == LOW) {
-    // ---------- button pressed ----------
-    if (!btnWhiteHeld) {  // first edge
+  /* --------------------------------------------------------------
+     WHITE button (GPIO 32) – Reset / Continue handling
+     -------------------------------------------------------------- */
+  if (digitalRead(PIN_BTN_WHITE) == LOW) {  // button pressed
+    if (!btnWhiteHeld) {                    // first edge
       btnWhiteHeld = true;
       btnWhitePressTime = now;
     } else {
@@ -1611,74 +1965,77 @@ void loop() {
             leds[i + ledStartOffset] = CRGB::Blue;
         }
         FastLED.show();
-        return;  // stay in Wi‑Fi mode until the button is released
+        return;  // stay in Wi‑Fi mode until button is released
       }
     }
-  } else {
-    // ---------- button released ----------
+  } else {               // button released
     if (btnWhiteHeld) {  // we just let go
       unsigned long pressLen = now - btnWhitePressTime;
       btnWhiteHeld = false;
 
-      // ---- long press -> Wi‑Fi (safety net) ----
+      // ---- long press → Wi‑Fi (safety net) ----
       if (pressLen > 3000) {
         wifiMode = true;
         enableWiFi();  // start AP + web‑UI
         return;
       }
 
-      // ---- short press ----
-      ///      if (levelJustFinished) {
-      ///        // Still on the “you win” screen → go to the next level
-      ///        continueToNextLevel();
-      ///      } else {
-      // Normal situation → **full reset** for a fresh player
-      abortAndResetGame();  // <-- NEW – true full reset
-      return;               // *** stop processing the rest of loop() ***
+      // ---- short press → **full game reset** ----
+      abortAndResetGame();  // true full reset
+      return;               // stop processing the rest of loop()
     }
   }
 
 
-  // -----------------------------------------------------------------
-  //  NEW: "Continue" button (GPIO27) – go to the next level
-  // -----------------------------------------------------------------
-  if (digitalRead(PIN_BTN_CONTINUE) == LOW) {  // button pressed
+  /* --------------------------------------------------------------
+     CONTINUE button (GPIO 27) – go to the next level (only when a
+     level has just been won)
+     -------------------------------------------------------------- */
+  if (digitalRead(PIN_BTN_CONTINUE) == LOW) {  // pressed
     if (!btnContinueHeld) {                    // first edge
       btnContinueHeld = true;
       btnContinuePressTime = now;
     }
-    // (no long‑press behaviour – only a quick tap matters)
-  } else {                  // button released
+  } else {                  // released
     if (btnContinueHeld) {  // we just let go
       unsigned long holdTime = now - btnContinuePressTime;
       btnContinueHeld = false;
 
-      // -------------------------------------------------------------
-      // Only allow a transition when the game has just finished a level
-      // -------------------------------------------------------------
-      if (levelJustFinished && holdTime < 1000) {  // short tap
-        continueToNextLevel();                     // <<< NEW ACTION
+      if (levelJustFinished && holdTime < 1000) {  // short tap while win screen
+        continueToNextLevel();                     // start next level, keep score
       }
-      // (If the button is pressed at any other time we simply ignore it)
     }
   }
 
-  // -------------------------------------------------------------
-  // Light‑up the “sacrifice” LED while a level‑completion is waiting
-  // -------------------------------------------------------------
+
+
+  /* --------------------------------------------------------------
+      Blink the LED (LED0) 2 Hz  **and** GPIO 19 in sync while we are waiting on the
+      level‑completed screen
+     -------------------------------------------------------------- */
   if (levelJustFinished) {
-    // Blink the sacrificial LED (LED0) at 2Hz to hint the player
-    static unsigned long lastBlink = 0;
-    if (now - lastBlink >= 250) {
+    static unsigned long lastBlink = 0;  // already existed for the strip LED
+    if (now - lastBlink >= 250) {        // 250 ms → 2 Hz
       lastBlink = now;
+
+      // ----- toggle the NeoPixel sacrificial LED -----
       if (config_sacrifice_led) {
         leds[0] = (leds[0] == CRGB::Black) ? CRGB(20, 0, 0) : CRGB::Black;
         FastLED.show();
       }
+
+      // ----- toggle the external GPIO‑19 LED in the exact same instant -----
+      gpio19State = !gpio19State;  // invert state
+      digitalWrite(PIN_GPIO19_LED,
+                   gpio19State ? HIGH : LOW);  // HIGH = LED ON
     }
   }
 
 
+
+  /* --------------------------------------------------------------
+     Quick‑return for the various non‑playing states
+     -------------------------------------------------------------- */
   if (currentState == STATE_LEVEL_COMPLETED) {
     updateLevelCompletedAnim();
     return;
@@ -1688,13 +2045,15 @@ void loop() {
     return;
   }
   if (currentState == STATE_GAME_FINISHED) {
-    for (int i = 0; i < config_num_leds; i++) leds[i + ledStartOffset] = CHSV((now / 10) + (i * 5), 255, 255);
+    for (int i = 0; i < config_num_leds; i++)
+      leds[i + ledStartOffset] = CHSV((now / 10) + (i * 5), 255, 255);
     if (config_sacrifice_led) leds[0] = CRGB(20, 0, 0);
     FastLED.show();
     return;
   }
   if (currentState == STATE_GAMEOVER) {
-    for (int i = 0; i < config_num_leds; i++) leds[i + ledStartOffset] = CRGB::Red;
+    for (int i = 0; i < config_num_leds; i++)
+      leds[i + ledStartOffset] = CRGB::Red;
     if (config_sacrifice_led) leds[0] = CRGB(20, 0, 0);
     FastLED.show();
     return;
@@ -1703,14 +2062,10 @@ void loop() {
     updateLevelIntro();
     return;
   }
-
-  // -----------------------------------------------------------------
-  // OPTIONAL MENU STATE – shows a simple “press white to continue”
-  // (Uncomment the block in `setup()` if you want a visual pause)
-  // -----------------------------------------------------------------
   if (currentState == STATE_MENU) {
     drawMenu();
-    // White‑button press while we are in the menu starts the next level
+    hintLEDsOFF();  // force all hint LEDs OFF while in the menu
+    /* (the menu uses the white button to start the next level) */
     if (digitalRead(PIN_BTN_WHITE) == LOW && !btnWhiteHeld) {
       btnWhiteHeld = true;
       btnWhitePressTime = now;
@@ -1722,29 +2077,49 @@ void loop() {
     return;
   }
 
-
+  /* --------------------------------------------------------------
+     PLAYING / BOSS PLAYING – main game logic
+     -------------------------------------------------------------- */
   if (currentState == STATE_PLAYING || currentState == STATE_BOSS_PLAYING) {
+    /* ------------------  INPUT ------------------- */
     bool b = (digitalRead(PIN_BTN_BLUE) == LOW);
     bool r = (digitalRead(PIN_BTN_RED) == LOW);
     bool g = (digitalRead(PIN_BTN_GREEN) == LOW);
     bool isAnyBtnPressed = (b || r || g);
+
+    bool buttonPressedThisFrame = isAnyBtnPressed;  // remember for later
+    if (buttonPressedThisFrame) {
+      // Reset the hint LEDs.
+      // hintLEDsOFF();
+
+      // also clear the pending‑hint flag so the later logic cannot re‑turn it on
+      hintPending = false;
+    }
 
     if (!isAnyBtnPressed) {
       buttonsReleased = true;
       isWaitingForCombo = false;
     }
 
-    // INPUT HANDLING
-    if (currentBossType == 3) {
+    /* ------------------  INPUT HANDLING ------------------ */
+    if (currentBossType == 3) {  // RGB Overlord – combo mode
       if (isAnyBtnPressed && buttonsReleased && !isWaitingForCombo && (now - lastFireTime > FIRE_COOLDOWN)) {
         isWaitingForCombo = true;
         comboTimer = now;
       }
       if (isWaitingForCombo && (now - comboTimer >= INPUT_BUFFER_MS)) {
         int c = 0;
-        b = (digitalRead(PIN_BTN_BLUE) == LOW);
-        r = (digitalRead(PIN_BTN_RED) == LOW);
-        g = (digitalRead(PIN_BTN_GREEN) == LOW);
+
+        uint32_t now = millis();
+
+        btnRawB = (digitalRead(PIN_BTN_BLUE) == LOW);
+        btnRawR = (digitalRead(PIN_BTN_RED) == LOW);
+        btnRawG = (digitalRead(PIN_BTN_GREEN) == LOW);
+
+        bool b = debounceButton(btnRawB, btnStableB, lastChangeB, now);
+        bool r = debounceButton(btnRawR, btnStableR, lastChangeR, now);
+        bool g = debounceButton(btnRawG, btnStableG, lastChangeG, now);
+
         if (r && g && b) c = 7;
         else if (r && g) c = 4;
         else if (r && b) c = 5;
@@ -1752,27 +2127,22 @@ void loop() {
         else if (b) c = 1;
         else if (r) c = 2;
         else if (g) c = 3;
-        if (c > 0) {
+        if (c) {
           shots.push_back({ 0.0, c });
-          stat_totalShots++;
-          stat_lastGameShots++;  // STATS UPDATE
-          saveHighscores();      // Persist shots? Maybe too often. Lets save at end of game/level.
           lastFireTime = now;
           playShotSound(c);
         }
         buttonsReleased = false;
         isWaitingForCombo = false;
       }
-    } else {
+    } else {  // normal enemies / other bosses
       if (isAnyBtnPressed && buttonsReleased && (now - lastFireTime > FIRE_COOLDOWN)) {
         int c = 0;
         if (b) c = 1;
         else if (r) c = 2;
         else if (g) c = 3;
-        if (c > 0) {
+        if (c) {
           shots.push_back({ 0.0, c });
-          stat_totalShots++;
-          stat_lastGameShots++;  // STATS UPDATE
           lastFireTime = now;
           playShotSound(c);
         }
@@ -1780,7 +2150,7 @@ void loop() {
       }
     }
 
-    // SHOT MOVEMENT
+    /* ------------------  SHOT MOVEMENT ------------------- */
     float moveStep = (float)config_shot_speed_pct / 60.0;
     moveStep = moveStep * 0.6;
     if (moveStep < 0.2) moveStep = 0.2;
@@ -1789,25 +2159,35 @@ void loop() {
       shots[i].position += moveStep;
       bool remove = false;
 
-      // HIT DETECTION
-      if (currentState == STATE_PLAYING) {
+
+      // ===  HIT DETECTION  === //
+      if (currentState == STATE_PLAYING) {  // normal wave
         if (shots[i].position >= enemyFrontIndex && !enemies.empty()) {
-          if (shots[i].color == enemies[0].color) {
+          if (shots[i].color == enemies[0].color) {  // **correct hit**
             enemies.erase(enemies.begin());
-            stat_totalKills++;  // STATS
             enemyFrontIndex += 1.0;
             flashPixel((int)shots[i].position);
             remove = true;
             checkWinCondition();
-          } else {
+            hitJustOccurred = true;  // tell hint logic
+            playSound(EVT_HIT_SUCCESS);
+            /*
+          } else {  // wrong colour → penalty.  Add players color to the START of the enemy array
             enemies.insert(enemies.begin(), { shots[i].color, 0.0 });
             enemyFrontIndex -= 1.0;
             remove = true;
             playSound(EVT_MISTAKE);
           }
+          */
+          } else {  // wrong colour → penalty. Add the player's color to the END of the enemy array
+            enemies.push_back({ shots[i].color, 0.0 });
+            // enemyFrontIndex remains the same since we're adding to the back
+            remove = true;
+            playSound(EVT_MISTAKE);
+          }
         }
-      } else if (currentState == STATE_BOSS_PLAYING) {
-        // BOSS PROJECTILES COLLISION
+      } else if (currentState == STATE_BOSS_PLAYING) {  // boss fight
+        /* ----- boss projectiles ----- */
         for (int p = 0; p < bossProjectiles.size(); p++) {
           if (shots[i].position >= bossProjectiles[p].pos) {
             if (shots[i].color == bossProjectiles[p].color) {
@@ -1819,7 +2199,7 @@ void loop() {
           }
         }
 
-        // BOSS SEGMENT COLLISION
+        /* ----- boss segment collision ----- */
         if (!remove && shots[i].position >= enemyFrontIndex && !bossSegments.empty()) {
           int hitIndex = (int)(shots[i].position - enemyFrontIndex);
           if (hitIndex >= 0 && hitIndex < bossSegments.size()) {
@@ -1831,66 +2211,61 @@ void loop() {
               if (boss3State != B3_PHASE_CHANGE) vulnerable = true;
             }
 
-            if (vulnerable) {
-              if (shots[i].color == bossSegments[hitIndex].color) {
-                flashPixel((int)shots[i].position);
-                bossSegments[hitIndex].hp--;
-                if (bossSegments[hitIndex].hp <= 0) {
-                  bossSegments.erase(bossSegments.begin() + hitIndex);
-                  stat_totalKills++;  // STATS
-                  if (hitIndex == 0) enemyFrontIndex += 1.0;
-                  playSound(EVT_HIT_SUCCESS);
-                }
-                checkWinCondition();
+            if (vulnerable && shots[i].color == bossSegments[hitIndex].color) {
+              flashPixel((int)shots[i].position);
+              bossSegments[hitIndex].hp--;
+              if (bossSegments[hitIndex].hp <= 0) {
+                bossSegments.erase(bossSegments.begin() + hitIndex);
+                if (hitIndex == 0) enemyFrontIndex += 1.0;
+                playSound(EVT_HIT_SUCCESS);
+                hitJustOccurred = true;  // tell hint logic
               }
+              checkWinCondition();
             }
             remove = true;
           }
         }
       }
+
       if (shots[i].position >= config_num_leds) remove = true;
       if (remove) shots.erase(shots.begin() + i);
     }
 
-    // ENEMY MOVEMENT
+    /* ------------------  ENEMY / BOSS MOVEMENT ------------------- */
     if (currentState == STATE_PLAYING) {
       float enemySpeed = (float)levels[currentLevel].speed;
       float eStep = enemySpeed / 60.0;
       enemyFrontIndex -= eStep;
-      if (enemyFrontIndex <= config_homebase_size) { triggerBaseDestruction(); }
-    } else if (currentState == STATE_BOSS_PLAYING) {
+      if (enemyFrontIndex <= config_homebase_size) triggerBaseDestruction();
+    } else {  // STATE_BOSS_PLAYING
       int pSpeed = 60;
       if (currentBossType == 1) pSpeed = boss1Cfg.shotSpeed;
       if (currentBossType == 2) pSpeed = boss2Cfg.shotSpeed;
       moveBossProjectiles((float)pSpeed);
 
-      if (currentBossType == 1) {
+      if (currentBossType == 1) {  // Masterblaster
         float bStep = (float)boss1Cfg.moveSpeed / 60.0;
         enemyFrontIndex -= bStep;
-        if (enemyFrontIndex <= config_homebase_size) { triggerBaseDestruction(); }
+        if (enemyFrontIndex <= config_homebase_size) triggerBaseDestruction();
         if (now - bossActionTimer > (boss1Cfg.shotFreq * 100)) {
           bossActionTimer = now;
           int shotColor = 0;
-          int frontColor = 0;
-          if (bossSegments.size() > 0) frontColor = bossSegments[0].color;
-          if (random(100) < 20 && frontColor > 0) {
-            shotColor = frontColor;
-          } else {
+          int frontColor = (bossSegments.size() ? bossSegments[0].color : 0);
+          if (random(100) < 20 && frontColor > 0) shotColor = frontColor;
+          else {
             do { shotColor = random(1, 4); } while (shotColor == frontColor && frontColor > 0);
           }
           bossProjectiles.push_back({ enemyFrontIndex, shotColor });
         }
-      } else if (currentBossType == 2) {
+      } else if (currentBossType == 2) {  // The Tank
         if (boss2State == B2_MOVE) {
           float bStep = (float)boss2Cfg.moveSpeed / 60.0;
           enemyFrontIndex -= bStep;
-          if (boss2Section < 3) {
-            if (enemyFrontIndex <= markerPos[boss2Section]) {
-              boss2State = B2_CHARGE;
-              bossActionTimer = now;
-            }
+          if (boss2Section < 3 && enemyFrontIndex <= markerPos[boss2Section]) {
+            boss2State = B2_CHARGE;
+            bossActionTimer = now;
           }
-          if (enemyFrontIndex <= config_homebase_size) { triggerBaseDestruction(); }
+          if (enemyFrontIndex <= config_homebase_size) triggerBaseDestruction();
         } else if (boss2State == B2_CHARGE) {
           if (now - bossActionTimer < (boss2Cfg.shotFreq * 100)) {
             if (now % 100 < 20) boss2LockedColor = random(1, 4);
@@ -1898,8 +2273,7 @@ void loop() {
             boss2State = B2_SHOOT;
             boss2ShotsFired = 0;
             bossActionTimer = now;
-            int startRange = 0;
-            int endRange = 0;
+            int startRange = 0, endRange = 0;
             if (boss2Section == 0) {
               startRange = 0;
               endRange = 2;
@@ -1910,9 +2284,9 @@ void loop() {
               startRange = 0;
               endRange = 8;
             }
-            for (auto &seg : bossSegments) {
-              if (seg.originalIndex >= startRange && seg.originalIndex <= endRange) seg.color = boss2LockedColor;
-            }
+            for (auto &seg : bossSegments)
+              if (seg.originalIndex >= startRange && seg.originalIndex <= endRange)
+                seg.color = boss2LockedColor;
           }
         } else if (boss2State == B2_SHOOT) {
           if (now - bossActionTimer > 150) {
@@ -1920,8 +2294,7 @@ void loop() {
             bossProjectiles.push_back({ enemyFrontIndex, boss2LockedColor });
             boss2ShotsFired++;
             if (boss2ShotsFired >= 10) {
-              int startRange = 0;
-              int endRange = 0;
+              int startRange = 0, endRange = 0;
               if (boss2Section == 0) {
                 startRange = 0;
                 endRange = 2;
@@ -1932,36 +2305,29 @@ void loop() {
                 startRange = 0;
                 endRange = 8;
               }
-              for (auto &seg : bossSegments) {
-                if (seg.originalIndex >= startRange && seg.originalIndex <= endRange) seg.active = true;
-              }
+              for (auto &seg : bossSegments)
+                if (seg.originalIndex >= startRange && seg.originalIndex <= endRange)
+                  seg.active = true;
               boss2State = B2_MOVE;
               boss2Section++;
             }
           }
         }
-      } else if (currentBossType == 3) {
-        // --- LOGIC: SAFE FIRE ZONE ---
-        // Wenn Strip > 180 LEDs (echtes Setup), nicht mehr schießen ab LED 70.
-        // Wenn Strip <= 180 LEDs (Test/Notfall), schießen bis kurz vor die Basis (Basis + 5).
+      } else if (currentBossType == 3) {  // RGB Overlord
         float safeFireLimit = (config_num_leds > 180) ? 70.0 : (float)(config_homebase_size + 5);
 
-        // --- PHASE CHANGE TRIGGER ---
         if (boss3State == B3_MOVE && boss3PhaseIndex < 2 && enemyFrontIndex <= boss3Markers[boss3PhaseIndex]) {
           boss3State = B3_PHASE_CHANGE;
           bossActionTimer = now;
         }
 
-        // --- STATE HANDLING ---
         if (boss3State == B3_MOVE) {
           float bStep = (float)boss3Cfg.moveSpeed / 60.0;
           enemyFrontIndex -= bStep;
-          if (enemyFrontIndex <= config_homebase_size) { triggerBaseDestruction(); }
-
-          // CHECK: Nur schießen, wenn wir noch vor der Safe-Zone sind
+          if (enemyFrontIndex <= config_homebase_size) triggerBaseDestruction();
           if (enemyFrontIndex > safeFireLimit && boss3Cfg.shotFreq > 0 && (now - bossActionTimer > (boss3Cfg.shotFreq * 100))) {
             bossActionTimer = now;
-            bossProjectiles.push_back({ enemyFrontIndex, (int)random(1, 4) });
+            bossProjectiles.push_back({ enemyFrontIndex, random(1, 4) });
           }
         } else if (boss3State == B3_PHASE_CHANGE) {
           if (now - bossActionTimer > 4000) {
@@ -1974,9 +2340,8 @@ void loop() {
         } else if (boss3State == B3_BURST) {
           if (now - bossActionTimer > 200) {
             bossActionTimer = now;
-            // CHECK: Auch Burst-Attacken respektieren die Safe-Zone
             if (enemyFrontIndex > safeFireLimit) {
-              bossProjectiles.push_back({ enemyFrontIndex, (int)random(1, 8) });
+              bossProjectiles.push_back({ enemyFrontIndex, random(1, 8) });
             }
             boss3BurstCounter++;
             if (boss3BurstCounter >= boss3Cfg.burstCount) {
@@ -1993,12 +2358,17 @@ void loop() {
       }
     }
 
+    /* --------------------------------------------------------------
+       DRAW the LED strip (unchanged)
+       -------------------------------------------------------------- */
     FastLED.clear();
+
+    // ---- optional visual markers for some bosses (unchanged) ----
     if (currentState == STATE_BOSS_PLAYING) {
       if (currentBossType == 2) {
-        for (int i = 0; i < 3; i++) {
-          if (markerPos[i] < enemyFrontIndex) leds[markerPos[i] + ledStartOffset] = CRGB(50, 0, 0);
-        }
+        for (int i = 0; i < 3; i++)
+          if (markerPos[i] < enemyFrontIndex)
+            leds[markerPos[i] + ledStartOffset] = CRGB(50, 0, 0);
       } else if (currentBossType == 3) {
         if (boss3PhaseIndex <= 0) {
           leds[boss3Markers[0] + ledStartOffset] = CRGB(50, 0, 0);
@@ -2010,17 +2380,21 @@ void loop() {
         }
       }
     }
+
+    // ---- normal enemies (wave) ----
     if (currentState == STATE_PLAYING) {
-      for (int i = 0; i < enemies.size(); i++) {
+      for (size_t i = 0; i < enemies.size(); i++) {
         float pos = enemyFrontIndex + (float)i;
         drawCrispPixel(pos, getColor(enemies[i].color));
       }
-    } else if (currentState == STATE_BOSS_PLAYING) {
-      for (int i = 0; i < bossSegments.size(); i++) {
+    }
+    // ---- boss segments ----
+    else if (currentState == STATE_BOSS_PLAYING) {
+      for (size_t i = 0; i < bossSegments.size(); i++) {
         float pos = enemyFrontIndex + (float)i;
-        if (pos < config_num_leds && pos >= 0) {
+        if (pos >= 0 && pos < config_num_leds) {
           CRGB c = getColor(bossSegments[i].color);
-          if (currentBossType == 2) {
+          if (currentBossType == 2) {  // The Tank
             c = col_cb;
             if (boss2State == B2_MOVE) {
               if (bossSegments[i].active) {
@@ -2030,13 +2404,9 @@ void loop() {
             } else if (boss2State == B2_CHARGE || boss2State == B2_SHOOT) {
               int oid = bossSegments[i].originalIndex;
               bool highlight = false;
-              if (boss2Section == 0) {
-                if (oid >= 0 && oid <= 2) highlight = true;
-              } else if (boss2Section == 1) {
-                if (oid >= 0 && oid <= 5) highlight = true;
-              } else if (boss2Section >= 2) {
-                highlight = true;
-              }
+              if (boss2Section == 0 && oid >= 0 && oid <= 2) highlight = true;
+              else if (boss2Section == 1 && oid >= 0 && oid <= 5) highlight = true;
+              else if (boss2Section >= 2) highlight = true;
               if (highlight) c = getColor(boss2LockedColor);
             }
           } else if (currentBossType == 3 && boss3State == B3_PHASE_CHANGE) {
@@ -2045,15 +2415,79 @@ void loop() {
           drawCrispPixel(pos, c);
         }
       }
-      for (auto &p : bossProjectiles) {
+      // boss projectiles
+      for (auto &p : bossProjectiles)
         drawCrispPixel(p.pos, getColor(p.color));
-      }
     }
-    for (auto &s : shots) {
+
+    // ---- player shots ----
+    for (auto &s : shots)
       drawCrispPixel(s.position, getColor(s.color));
-    }
-    for (int i = 0; i < config_homebase_size; i++) leds[i + ledStartOffset] = CRGB::White;
+
+    // ---- home‑base (white) ----
+    for (int i = 0; i < config_homebase_size; i++)
+      leds[i + ledStartOffset] = CRGB::White;
+
+    // ---- sacrificial LED (red) ----
     if (config_sacrifice_led) leds[0] = CRGB(20, 0, 0);
+
+    /* --------------------------------------------------------------
+       **HINT‑LED UPDATE** – runs after all game logic but
+       **before** the strip is finally shown.
+       -------------------------------------------------------------- */
+
+    int leadColourNow = -1;
+    if (currentState == STATE_PLAYING && !enemies.empty())
+      leadColourNow = enemies.front().color;  // 1 = blue, 2 = red, 3 = green
+    else if (currentState == STATE_BOSS_PLAYING && !bossSegments.empty())
+      leadColourNow = bossSegments.front().color;  // may be 1‑6 (mix colours)
+
+
+
+    bool showHint = false;
+
+    // **IMPORTANT:** if the player pressed any button this frame we *must*
+    // keep the hint off, regardless of colour changes.
+    if (!buttonPressedThisFrame) {
+      if (leadColourNow != -1) {
+        if (leadColourNow != lastLeadColour) {  // colour changed
+          showHint = true;
+        } else if (hitJustOccurred && leadColourNow == lastLeadColour) {  // we just killed it
+          showHint = true;
+        } else {
+          showHint = hintPending;  // keep previous state
+        }
+      }
+    } else {
+      // button was pressed – keep hint off
+      showHint = false;
+    }
+
+
+// Temporary for Halloween, 'HIGH : HIGH' instead of 'HIGH : LOW'
+    if (showHint) {
+      digitalWrite(PIN_HINT_RED, (leadColourNow == 2) ? HIGH : HIGH);
+      digitalWrite(PIN_HINT_BLUE, (leadColourNow == 1) ? HIGH : HIGH);
+      digitalWrite(PIN_HINT_GREEN, (leadColourNow == 3) ? HIGH : HIGH);
+    } else {
+      hintLEDsOFF();
+    }
+
+
+
+    // remember for the next frame
+    hintPending = showHint;
+    lastLeadColour = leadColourNow;
+    hitJustOccurred = false;  // reset for next loop
+
+    // --------------------------------------------------------------
+    // make sure GPIO19 is off when the level‑finished flag is cleared
+    // --------------------------------------------------------------
+    if (!levelJustFinished && gpio19State) {
+      gpio19State = false;
+      digitalWrite(PIN_GPIO19_LED, LOW);
+    }
+
     FastLED.show();
   }
 }
