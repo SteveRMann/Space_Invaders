@@ -22,12 +22,12 @@ V7 Replace UDP Sound Functions with tone()
 V8 Fixed upload problem, added hint option.
 V9 Removed game statistics
 V10 Removed scoring
+    One timeout for both win or lose: #define RESULT_FLASH_MS 1000
 
 ==========================================================================
 */
 
-#define VERSION 10.0  // Added "Halloween", hint LEDs on all the time.
-                      // hintLEDsOFF()
+#define VERSION 10.0  
 
 bool config_hint_always_on = true;  // Set to true to keep hints always ON
 
@@ -87,6 +87,7 @@ static bool gpio19State = false;       // current level of GPIO19 (HIGH/LOW)
 
 #define CONFIG_VERSION 31
 #define FRAME_DELAY 16  // 16ms = approx. 60 FPS
+#define RESULT_FLASH_MS 1000  // How long the green WIN / red LOSE strip stays lit before going black
 #define INPUT_BUFFER_MS 60
 #define SAMPLE_RATE 44100
 
@@ -914,25 +915,19 @@ void updateLevelIntro() {
 
 
 /* ----------------- updateLevelCompletedAnim ----------------------------
-   Shows the “level cleared” animation: a solid colour for 1 s, then a progress
-   bar that visualises the ratio of achieved score to maximum possible score.
+   Shows the “level cleared” animation: solid green for 1 s.
+   NO score bar any more: after the green flash the game strip goes black
+   while waiting for the Continue button. leds[0] (sacrificial LED) is left
+   alone so the 2 Hz "waiting" blink in loop() keeps working.
    ----------------------------------------------------------------------- */
 void updateLevelCompletedAnim() {
   unsigned long elapsed = millis() - stateTimer;
-  if (elapsed < 1000) {
+  if (elapsed < RESULT_FLASH_MS) {
     fill_solid(leds, config_num_leds + ledStartOffset, col_c3);
     if (config_sacrifice_led) leds[0] = CRGB(20, 0, 0);
-  } else if (elapsed < 5000) {
-    FastLED.clear();
-    if (config_sacrifice_led) leds[0] = CRGB(20, 0, 0);
-    float pct = (float)levelAchievedScore / (float)levelMaxPossibleScore;
-    if (pct > 1.0) pct = 1.0;
-    int fillLeds = (int)(config_num_leds * pct);
-
-    for (int i = 0; i < fillLeds; i++) leds[i + ledStartOffset] = CRGB(80, 60, 0);
-    for (int i = fillLeds; i < config_num_leds; i++) leds[i + ledStartOffset] = CRGB(20, 0, 0);
   } else {
-    ///startLevelIntro(currentLevel + 1);
+    // Green "win" flash is over: blank the game strip
+    fill_solid(&leds[ledStartOffset], config_num_leds, CRGB::Black);
   }
   FastLED.show();
 }
@@ -956,6 +951,7 @@ void updateBaseDestroyedAnim() {
     FastLED.show();
   } else {
     currentState = STATE_GAMEOVER;
+    stateTimer = millis();  // start the red LOSE timeout
     hintLEDsOFF();
   }
 }
@@ -2064,8 +2060,10 @@ void loop() {
     return;
   }
   if (currentState == STATE_GAMEOVER) {
+    // Red LOSE strip for RESULT_FLASH_MS (same as the green WIN flash), then black
+    CRGB c = (now - stateTimer < RESULT_FLASH_MS) ? CRGB::Red : CRGB::Black;
     for (int i = 0; i < config_num_leds; i++)
-      leds[i + ledStartOffset] = CRGB::Red;
+      leds[i + ledStartOffset] = c;
     if (config_sacrifice_led) leds[0] = CRGB(20, 0, 0);
     FastLED.show();
     return;
