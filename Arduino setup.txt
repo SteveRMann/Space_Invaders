@@ -14,7 +14,8 @@ Flash Mode: DIO 80 MHz
 Flash Size: 16 MB
 Partition: 16M FLASH (3MB APP / 9.9MB FATFS)
 PSRAM: Disabled
-USB CDC on Boot: Disabled These settings are compatible with cheap ESP32 S3 boards. 
+USB CDC on Boot: Disabled
+ These settings are compatible with cheap ESP32 S3 boards. 
   Many AliExpress boards having issue with OPI RAM :-(
 
 🚀 Uploading Firmware (ESP32-S3)
