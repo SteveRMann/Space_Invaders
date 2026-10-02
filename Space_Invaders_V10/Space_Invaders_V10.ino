@@ -228,8 +228,8 @@ CRGB col_c1, col_c2, col_c3, col_c4, col_c5, col_c6, col_cw, col_cb;
 Melody melStart, melWin, melLose, melMistake, melShotBlue, melShotRed, melShotGreen, melShotWhite, melHit;
 
 // Config
-int config_num_leds = 478;
-int config_brightness_pct = 25;
+int config_num_leds = 299;
+int config_brightness_pct = 10;
 int config_start_level = 1;
 bool config_sacrifice_led = true;
 int config_homebase_size = 1;
@@ -1202,7 +1202,7 @@ void setupDefaultConfig() {
 void loadConfig(String prefix) {
   // Convenience wrapper that simply loads the “standard” profile defaults (def_).
   preferences.begin("game", true);
-  config_num_leds = preferences.getInt((prefix + "leds").c_str(), config_num_leds);
+  //config_num_leds = preferences.getInt((prefix + "leds").c_str(), config_num_leds);
   config_brightness_pct = preferences.getInt((prefix + "bright").c_str(), config_brightness_pct);
   config_start_level = preferences.getInt((prefix + "startlvl").c_str(), config_start_level);
   config_ssid = preferences.getString("ssid", "");
