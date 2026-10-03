@@ -1,0 +1,6 @@
+  LED Blink Test for the Space Invaders hardware (ESP32 Dev Module)
+  - Onboard blue LED (GPIO2), GPIO19 status LED, hint LEDs (GPIO12/13/14)
+    all toggle once per second.
+  - WS2812B strip on GPIO15 cycles red -> green -> blue -> off on the
+    first 20 LEDs (low brightness, safe on USB power).
+  - Serial (115200) prints a heartbeat and which game buttons are pressed.

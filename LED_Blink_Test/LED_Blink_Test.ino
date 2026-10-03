@@ -35,7 +35,7 @@ void setup() {
   for (int b : buttons) pinMode(b, INPUT_PULLUP);
 
   FastLED.addLeds<WS2812B, PIN_LED_DATA, GRB>(leds, TEST_LEDS);
-  FastLED.setBrightness(40);
+  FastLED.setBrightness(10);
 }
 
 void loop() {
