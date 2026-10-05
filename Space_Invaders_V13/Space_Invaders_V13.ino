@@ -61,7 +61,7 @@ int config_enemy_speed = 5;        // Invader speed (LEDs per second)
 bool config_sound_on = true;
 int config_volume_pct = 50;
 
-#define RESULT_FLASH_MS 1000  // How long the green WIN / red LOSE strip stays lit before going black
+#define RESULT_FLASH_MS 1500  // How long the green WIN / red LOSE strip stays lit before going black
 #define INTRO_MS 4000         // Length of the intro (bar steady 2 s, then flashing 2 s)
 #define FRAME_DELAY 16        // 16ms = approx. 60 FPS
 const int FIRE_COOLDOWN = 100;
