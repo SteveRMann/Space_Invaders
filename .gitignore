@@ -1,5 +1,15 @@
 # .gitignore file
 
+# Private WiFi credentials and OpenAI API key - do not publish
+secrets.h
+
+# Arduino / editor build output
+build/
+*.bin
+*.elf
+.vscode/
+
+
 *.tmp
 *.psd
 *.bak
@@ -10,5 +20,4 @@
 *.sch
 *.lnk
 *.gcode
-build/
 temp/
