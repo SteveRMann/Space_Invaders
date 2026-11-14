@@ -8,27 +8,6 @@ Flash Size: 4MB
 Partition: Default
 PSRAM: Disabled
 
-V1 This version strips the sound and 12s code.
-V2 adds a "continue" button to go to the next level.
-V3 adds "hint" LEDS, renamed White Button to Reset Button
-V4 Adds UDP commands to play sounds
-V5 Restores web page to set WiFi Credentials
-V6 Adds debounce to the RGB buttons.
-V7 Replace UDP Sound Functions with tone()
-   Add missed sprites to the END of the enemy array.
-V8 Fixed upload problem, added hint option.
-V9 Removed game statistics
-V10 Removed scoring
-V11 Removed all web code: WiFi, web server, web OTA, UDP, and NVS (Preferences)
-    storage. All settings now live in the CONFIG section below - edit and re-upload.
-V12 Simple single-level game: removed bosses, boss/combo mode, the 10-level
-    table, difficulty profiles, the "game finished" rainbow and the menu.
-V13 "Press any button to start": the game waits on a black strip (LED 0 and
-    GPIO19 blinking) at power-up and after every game; any of the 5 buttons
-    starts it. No separate Continue/start button needed.
-V14 Removed the green "level" bar intro. After the start button, the strip
-    stays dark for START_PAUSE_MS (get ready), then the invaders appear.
-    One difficulty only: config_enemy_count / config_enemy_speed.
 V15 Wait screen: random white "invader" streams while waiting for a button.
     Each stream starts as 1 LED at a random spot and grows one LED at a time
     (up to config_enemy_count long) as it moves in a random direction at a
@@ -54,6 +33,8 @@ HOW IT PLAYS
 #include "esp32-hal-ledc.h"  // For tone function
 #include <vector>
 #include <FastLED.h>
+// #include "secrets.h"
+
 
 // ============================================================================
 // CONFIG  - edit these and re-upload
